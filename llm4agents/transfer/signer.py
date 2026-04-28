@@ -17,7 +17,7 @@ def derive_address(private_key: str) -> str:
     return acct.address
 
 
-async def sign_typed_data(
+def sign_typed_data(
     typed_data: dict[str, Any],
     message_key: str,
     private_key: str,

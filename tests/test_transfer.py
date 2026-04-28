@@ -121,10 +121,10 @@ async def test_derive_address():
     assert addr == expected
 
 
-async def test_sign_typed_data_returns_components():
+def test_sign_typed_data_returns_components():
     quote_data = _mock_quote()
     td = quote_data["typed_data"]
-    sig = await sign_typed_data(td, "permit", MOCK_KEY)
+    sig = sign_typed_data(td, "permit", MOCK_KEY)
     assert sig.v in (27, 28)
     assert sig.r.startswith("0x")
     assert sig.s.startswith("0x")

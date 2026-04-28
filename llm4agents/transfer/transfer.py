@@ -14,8 +14,8 @@ class Transfer:
         return QuoteResult.from_dict(data)
 
     async def submit(self, quote: QuoteResult, private_key: str) -> TransferResult:
-        permit_sig = await sign_typed_data(quote.typed_data, "permit", private_key)
-        transfer_sig = await sign_typed_data(quote.typed_data, "transferPermit", private_key)
+        permit_sig = sign_typed_data(quote.typed_data, "permit", private_key)
+        transfer_sig = sign_typed_data(quote.typed_data, "transferPermit", private_key)
 
         payload: dict[str, Any] = {
             "quote_request_id": quote.request_id,
