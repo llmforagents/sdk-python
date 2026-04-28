@@ -73,6 +73,8 @@ class Conversation:
                 "messages": self._build_messages(),
             }
             if self._tools is not None:
+                if not self._tools.definitions:
+                    await self._tools.fetch_definitions()
                 params["tools"] = self._tools.definitions
 
             data = await self._http.post("/v1/chat/completions", params)
