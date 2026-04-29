@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, MagicMock
 from llm4agents.transport.http import HttpTransport
 from llm4agents.chat.conversation import Conversation
 from llm4agents.errors import LLM4AgentsError
+from llm4agents.tools.types import McpToolResult, McpTextContent
 
 
 @pytest.fixture
@@ -56,7 +57,10 @@ async def test_say_with_tool_call(http):
 
     mock_tools = MagicMock()
     mock_tools.definitions = [{"name": "scrape_url", "description": "Scrape", "inputSchema": {}}]
-    mock_tools.call = AsyncMock(return_value="<html>content</html>")
+    mock_tools.call = AsyncMock(return_value=McpToolResult(
+        content=(McpTextContent(type="text", text="<html>content</html>"),),
+        text="<html>content</html>",
+    ))
 
     call_count = 0
 

@@ -38,7 +38,8 @@ async def test_call_tool(mcp):
         })
     )
     result = await mcp.call_tool("scrape_url", {"url": "https://example.com"})
-    assert result == "Hello world"
+    assert result.text == "Hello world"
+    assert len(result.content) == 1
 
 
 @respx.mock

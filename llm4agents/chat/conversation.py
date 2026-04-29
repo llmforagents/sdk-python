@@ -123,7 +123,7 @@ class Conversation:
                 all_tool_calls.append({"name": name, "args": args, "result": result})
                 self._history.append({
                     "role": "tool",
-                    "content": str(result),
+                    "content": result.text,
                     "tool_calls": None,
                     "tool_call_id": tc.get("id"),
                 })

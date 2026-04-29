@@ -1,4 +1,5 @@
 from __future__ import annotations
+from dataclasses import dataclass
 from typing import Any
 from llm4agents.transport.http import HttpTransport
 from llm4agents.transport.mcp import McpTransport
@@ -14,6 +15,12 @@ _DEFAULT_TIMEOUT = 30.0
 _MCP_TIMEOUT = 60.0
 
 
+@dataclass(frozen=True)
+class ModelListResult:
+    models: list[dict[str, Any]]
+    request_id: str | None
+
+
 class _ChatNamespace:
     def __init__(self, completions: ChatCompletions, http: HttpTransport) -> None:
         self.completions = completions
@@ -27,9 +34,13 @@ class _ModelsNamespace:
     def __init__(self, http: HttpTransport) -> None:
         self._http = http
 
-    async def list(self) -> list[dict[str, Any]]:
-        data = await self._http.get("/api/v1/models/")
-        return data.get("models", [])
+    async def list(self, search: str | None = None) -> ModelListResult:
+        params: dict[str, str] | None = {"search": search} if search else None
+        data = await self._http.get("/api/v1/models/", params=params)
+        return ModelListResult(
+            models=data.get("models", []),
+            request_id=data.get("requestId"),
+        )
 
 
 class LLM4AgentsClient:

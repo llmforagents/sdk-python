@@ -1,8 +1,11 @@
 from __future__ import annotations
-from typing import Any
+from typing import Any, TYPE_CHECKING
 import json
 import httpx
 from llm4agents.errors import LLM4AgentsError, map_http_error
+
+if TYPE_CHECKING:
+    from llm4agents.tools.types import McpToolResult
 
 
 class McpTransport:
@@ -57,8 +60,30 @@ class McpTransport:
         self._tools_cache = tools
         return tools
 
-    async def call_tool(self, name: str, args: dict[str, Any]) -> str:
+    async def call_tool(self, name: str, args: dict[str, Any]) -> McpToolResult:
+        # Lazy import to avoid circular dependency: mcp → tools.types → tools.__init__ → tools.tools → mcp
+        from llm4agents.tools.types import McpImageContent, McpResourceContent, McpTextContent, McpToolResult  # noqa: PLC0415
+
         result = await self._rpc("tools/call", {"name": name, "arguments": args})
-        content: list[dict[str, Any]] = result.get("content", [])
-        parts = [item["text"] for item in content if item.get("type") == "text"]
-        return "\n".join(parts)
+        raw_content: list[dict[str, Any]] = result.get("content", [])
+
+        if result.get("isError"):
+            err_text = "\n".join(
+                item.get("text", "") for item in raw_content if item.get("type") == "text"
+            )
+            raise LLM4AgentsError(
+                err_text or f"Tool {name} failed", "tool_execution_error", None, None
+            )
+
+        content = []
+        for item in raw_content:
+            t = item.get("type", "text")
+            if t == "image":
+                content.append(McpImageContent(type="image", data=item.get("data", ""), mimeType=item.get("mimeType", "")))
+            elif t == "resource":
+                content.append(McpResourceContent(type="resource", uri=item.get("uri", ""), text=item.get("text"), mimeType=item.get("mimeType")))
+            else:
+                content.append(McpTextContent(type="text", text=item.get("text", "")))
+
+        text = "\n".join(c.text for c in content if isinstance(c, McpTextContent))
+        return McpToolResult(content=tuple(content), text=text)
