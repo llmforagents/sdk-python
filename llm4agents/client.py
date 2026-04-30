@@ -8,6 +8,7 @@ from llm4agents.chat.conversation import Conversation
 from llm4agents.wallets.wallets import Wallets
 from llm4agents.transfer.transfer import Transfer
 from llm4agents.tools.tools import Tools
+from llm4agents.agents import Agents
 
 _DEFAULT_BASE_URL = "https://api.llm4agents.com"
 _DEFAULT_MCP_URL = "https://mcp.llm4agents.com/mcp"
@@ -61,3 +62,4 @@ class LLM4AgentsClient:
         self.transfer = Transfer(self._http)
         self.tools = Tools(mcp)
         self.models = _ModelsNamespace(self._http)
+        self.agents = Agents(self._http)

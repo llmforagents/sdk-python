@@ -8,6 +8,115 @@ if TYPE_CHECKING:
     from llm4agents.tools.types import McpToolResult
 
 
+def sniff_mime_type(base64: str) -> str:
+    """Sniff MIME type from the first 4 characters of a base64-encoded payload."""
+    prefix = base64[:4]
+    if prefix == "iVBO":
+        return "image/png"
+    if prefix == "/9j/":
+        return "image/jpeg"
+    if prefix == "JVBE":
+        return "application/pdf"
+    if prefix == "R0lG":
+        return "image/gif"
+    if prefix == "UklG":
+        return "image/webp"
+    return "image/png"
+
+
+def _extract_text(c: dict[str, Any]) -> str:
+    """Extract text from a content block, unwrapping JSON wrappers like {"text":"..."}."""
+    raw = c.get("text", "")
+    if not isinstance(raw, str):
+        if isinstance(raw, dict):
+            candidate = raw.get("text")
+            if isinstance(candidate, str):
+                return candidate
+        return ""
+    # Check for JSON wrapper {"text": "...", ...}
+    stripped = raw.lstrip()
+    if stripped.startswith("{"):
+        try:
+            parsed = json.loads(raw)
+            if isinstance(parsed, dict) and isinstance(parsed.get("text"), str):
+                return parsed["text"]
+        except (json.JSONDecodeError, ValueError):
+            pass
+    return raw
+
+
+def _normalize_content(c: dict[str, Any]) -> Any:
+    """Normalize a raw MCP content block into a typed McpContent.
+
+    Handles:
+    - Field aliasing: mime_type -> mimeType, imageBase64/pngBase64 -> data
+    - JSON-in-text unwrap: text blocks containing {"imageBase64":...}, {"pdfBase64":...},
+      {"pngBase64":...} are promoted to image/resource content.
+    """
+    # Lazy import to avoid circular dependency
+    from llm4agents.tools.types import McpImageContent, McpResourceContent, McpTextContent  # noqa: PLC0415
+
+    t = c.get("type", "text")
+
+    if t == "image":
+        data = (
+            c.get("data")
+            or c.get("imageBase64")
+            or c.get("pngBase64")
+            or c.get("pdfBase64")
+            or ""
+        )
+        mime_type: str = (
+            c.get("mimeType")
+            or c.get("mime_type")
+            or sniff_mime_type(str(data))
+        )
+        return McpImageContent(type="image", data=str(data), mimeType=mime_type)
+
+    if t == "resource":
+        mime_type_res: str | None = c.get("mimeType") or c.get("mime_type")
+        return McpResourceContent(
+            type="resource",
+            uri=c.get("uri", ""),
+            text=c.get("text"),
+            mimeType=mime_type_res,
+        )
+
+    # default: text — but first try to unwrap JSON payloads
+    text_value = _extract_text(c)
+
+    # Try to detect JSON-wrapped image/pdf payloads embedded in a text block
+    stripped = text_value.lstrip()
+    if stripped.startswith("{"):
+        try:
+            parsed = json.loads(text_value)
+            if isinstance(parsed, dict):
+                base64_val = (
+                    parsed.get("imageBase64")
+                    or parsed.get("pngBase64")
+                    or parsed.get("pdfBase64")
+                )
+                if base64_val is not None and isinstance(base64_val, str):
+                    resolved_mime: str = (
+                        parsed.get("mimeType")
+                        or parsed.get("mime_type")
+                        or sniff_mime_type(base64_val)
+                    )
+                    # PDF wrapped in text block
+                    if resolved_mime == "application/pdf" or "pdfBase64" in parsed:
+                        return McpResourceContent(
+                            type="resource",
+                            uri="",
+                            text=base64_val,
+                            mimeType="application/pdf",
+                        )
+                    return McpImageContent(type="image", data=base64_val, mimeType=resolved_mime)
+        except (json.JSONDecodeError, ValueError):
+            pass
+
+    return McpTextContent(type="text", text=text_value)
+
+
 class McpTransport:
     def __init__(self, mcp_url: str, api_key: str, timeout: float) -> None:
         self._url = mcp_url
@@ -62,28 +171,20 @@ class McpTransport:
 
     async def call_tool(self, name: str, args: dict[str, Any]) -> McpToolResult:
         # Lazy import to avoid circular dependency: mcp → tools.types → tools.__init__ → tools.tools → mcp
-        from llm4agents.tools.types import McpImageContent, McpResourceContent, McpTextContent, McpToolResult  # noqa: PLC0415
+        from llm4agents.tools.types import McpTextContent, McpToolResult  # noqa: PLC0415
 
         result = await self._rpc("tools/call", {"name": name, "arguments": args})
         raw_content: list[dict[str, Any]] = result.get("content", [])
 
         if result.get("isError"):
             err_text = "\n".join(
-                item.get("text", "") for item in raw_content if item.get("type") == "text"
+                _extract_text(item) for item in raw_content if item.get("type") == "text"
             )
             raise LLM4AgentsError(
                 err_text or f"Tool {name} failed", "tool_execution_error", None, None
             )
 
-        content = []
-        for item in raw_content:
-            t = item.get("type", "text")
-            if t == "image":
-                content.append(McpImageContent(type="image", data=item.get("data", ""), mimeType=item.get("mimeType", "")))
-            elif t == "resource":
-                content.append(McpResourceContent(type="resource", uri=item.get("uri", ""), text=item.get("text"), mimeType=item.get("mimeType")))
-            else:
-                content.append(McpTextContent(type="text", text=item.get("text", "")))
+        content = [_normalize_content(item) for item in raw_content]
 
         text = "\n".join(c.text for c in content if isinstance(c, McpTextContent))
         return McpToolResult(content=tuple(content), text=text)

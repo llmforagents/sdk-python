@@ -1,6 +1,7 @@
 from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, TypedDict
+import httpx
 
 
 class ChatMessage(TypedDict, total=False):
@@ -8,6 +9,36 @@ class ChatMessage(TypedDict, total=False):
     content: str | None
     tool_calls: list[Any] | None
     tool_call_id: str | None
+
+
+@dataclass(frozen=True)
+class ResponseMeta:
+    request_id: str | None
+    model_used: str | None
+    cost_usd_cents: int | None
+    balance_remaining_cents: int | None
+    tokens_input: int | None
+    tokens_output: int | None
+
+    @classmethod
+    def from_headers(cls, headers: httpx.Headers) -> ResponseMeta:
+        def parse_int(name: str) -> int | None:
+            val = headers.get(name)
+            if val is None:
+                return None
+            try:
+                return int(val)
+            except (ValueError, TypeError):
+                return None
+
+        return cls(
+            request_id=headers.get("x-request-id"),
+            model_used=headers.get("x-model-used"),
+            cost_usd_cents=parse_int("x-cost-usd-cents"),
+            balance_remaining_cents=parse_int("x-balance-remaining-cents"),
+            tokens_input=parse_int("x-tokens-input"),
+            tokens_output=parse_int("x-tokens-output"),
+        )
 
 
 @dataclass(frozen=True)

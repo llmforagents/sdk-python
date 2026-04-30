@@ -20,6 +20,7 @@ class QuoteResult:
     nonces: dict[str, int]
     typed_data: dict[str, Any]
     request_id: str
+    forwarder_address: str
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> QuoteResult:
@@ -39,6 +40,7 @@ class QuoteResult:
             nonces=d["nonces"],
             typed_data=d["typed_data"],
             request_id=d["request_id"],
+            forwarder_address=d.get("forwarderAddress", ""),
         )
 
 

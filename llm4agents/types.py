@@ -4,7 +4,7 @@ from typing import Any
 from llm4agents.errors import LLM4AgentsError, ErrorCode
 from llm4agents.wallets.types import WalletInfo, Balance, WalletBalance, Transaction, TransactionList
 from llm4agents.transfer.types import QuoteResult, TransferResult
-from llm4agents.chat.types import ChatMessage, ChatResponse, StreamChunk
+from llm4agents.chat.types import ChatMessage, ChatResponse, StreamChunk, ResponseMeta
 from llm4agents.chat.conversation import ConversationResponse
 from llm4agents.tools.types import McpToolResult, McpTextContent, McpImageContent, McpResourceContent, McpContent
 
@@ -28,6 +28,7 @@ __all__ = [
     "ChatMessage",
     "ChatResponse",
     "StreamChunk",
+    "ResponseMeta",
     "ConversationResponse",
     "McpToolResult",
     "McpTextContent",

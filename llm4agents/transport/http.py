@@ -50,8 +50,65 @@ class HttpTransport:
                 raise map_http_error(res.status_code, res.json(), self._request_id(res))
             return res.json()
 
+    async def post_with_meta(self, path: str, body: dict[str, Any]) -> tuple[Any, httpx.Headers]:
+        """Same as post() but returns (data, response_headers) together."""
+        async with self._client() as client:
+            try:
+                res = await client.post(path, content=json.dumps(body))
+            except httpx.TimeoutException as e:
+                raise LLM4AgentsError(str(e), "timeout", None, None) from e
+            except httpx.NetworkError as e:
+                raise LLM4AgentsError(str(e), "network_error", None, None) from e
+            if res.status_code >= 400:
+                raise map_http_error(res.status_code, res.json(), self._request_id(res))
+            return res.json(), res.headers
+
     async def post_stream(self, path: str, body: dict[str, Any]) -> AsyncIterator[Any]:
         return self._stream(path, body)
+
+    async def post_stream_with_meta(
+        self, path: str, body: dict[str, Any]
+    ) -> tuple[httpx.Headers, AsyncIterator[Any]]:
+        """Like post_stream() but also returns the response headers captured at connection time.
+
+        Returns ``(headers, async_iterator)`` so callers can read headers before
+        iterating over SSE chunks.
+        """
+        # We need to hold the client open for the lifetime of the returned iterator.
+        # We open the streaming context here, capture headers, and return a generator
+        # that owns the client context manager.
+        client = self._client()
+        try:
+            ctx = client.stream("POST", path, content=json.dumps(body))
+            res = await ctx.__aenter__()
+        except httpx.TimeoutException as e:
+            await client.aclose()
+            raise LLM4AgentsError(str(e), "timeout", None, None) from e
+        except httpx.NetworkError as e:
+            await client.aclose()
+            raise LLM4AgentsError(str(e), "network_error", None, None) from e
+
+        if res.status_code >= 400:
+            raw = await res.aread()
+            await ctx.__aexit__(None, None, None)
+            await client.aclose()
+            try:
+                err_body = json.loads(raw)
+            except Exception:
+                err_body = {}
+            raise map_http_error(res.status_code, err_body, self._request_id(res))
+
+        headers = res.headers
+
+        async def _gen() -> AsyncIterator[Any]:
+            try:
+                async for chunk in self._parse_sse(res):
+                    yield chunk
+            finally:
+                await ctx.__aexit__(None, None, None)
+                await client.aclose()
+
+        return headers, _gen()
 
     async def _stream(self, path: str, body: dict[str, Any]) -> AsyncIterator[Any]:
         async with self._client() as client:
