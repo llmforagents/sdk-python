@@ -85,6 +85,25 @@ response = await client.chat.completions.create({
     "include_reasoning": True,
 })
 
+# Vision (multimodal) input
+analysis = await client.chat.completions.create({
+    "model": "openai/gpt-4o",
+    "messages": [{
+        "role": "user",
+        "content": [
+            {"type": "text", "text": "What is in this image?"},
+            {"type": "image_url", "image_url": {"url": "https://example.com/image.png"}},
+        ],
+    }],
+})
+
+# Model fallbacks — try primary, fall back to secondary if it fails
+response = await client.chat.completions.create({
+    "models": ["anthropic/claude-sonnet-4", "openai/gpt-4o"],
+    "messages": [{"role": "user", "content": "Hello"}],
+})
+# X-Model-Used response header indicates which model actually responded
+
 # Force/restrict tool use
 response = await client.chat.completions.create({
     "model": "openai/gpt-4o",
@@ -92,22 +111,28 @@ response = await client.chat.completions.create({
     "tools": await client.tools.fetch_definitions(),
     "tool_choice": "required",  # "none" | "auto" | "required" | {"type": "function", "function": {"name": "..."}}
 })
-
 ```
 
 ### Conversation with Tools
 
 ```python
-from llm4agents.errors import LLM4AgentsError
+from llm4agents import LLM4AgentsError, ResponseMeta
+
+def on_round_meta(meta: ResponseMeta) -> None:
+    cents = meta.cost_usd_cents or 0
+    bal = meta.balance_remaining_cents or 0
+    print(f"Round cost: ${cents / 100:.4f}, balance: ${bal / 100:.2f}")
 
 conv = client.chat.conversation({
     "model": "anthropic/claude-sonnet-4",
     "system": "You are a research assistant",
     "tools": client.tools,
-    "history": [],          # optional: rehydrate from persisted messages
+    "history": [],                # optional: rehydrate from persisted messages
     "on_tool_call": lambda name, args: print(f"Calling {name}...") or True,
     "on_tool_result": lambda name, result: print(f"{name}: {result.text[:80]}"),
-    "max_tool_rounds": 5,   # default 10
+    "on_round_meta": on_round_meta,
+    "on_tools_ignored": lambda model: print(f"WARN: {model} ignored tools"),
+    "max_tool_rounds": 5,         # default 10
 })
 
 # Single turn
@@ -116,13 +141,32 @@ print(answer.content)
 for call in answer.tool_calls:
     print(f"  {call['name']} → {call['result'].text[:60]}")
 
+# Streaming conversation
+async for event in conv.stream("Now find the current price"):
+    if event["type"] == "text":
+        print(event["content"], end="", flush=True)
+    elif event["type"] == "reasoning":
+        print(f"<think>{event['content']}</think>", end="")
+    elif event["type"] == "meta":
+        print(f"\n[meta] request_id={event['meta'].request_id}")
+    elif event["type"] == "tool_call":
+        print(f"\n[tool] {event['name']}({event['args']})")
+    elif event["type"] == "tool_result":
+        print(f"[done] {event['result'].text[:60]}")
+    elif event["type"] == "done":
+        print(f"\nUsage: {event['response']['usage']}")
+
 # History management
 messages = conv.messages    # list[ChatMessage] — JSON-serializable
 conv.clear()                # reset to empty, keeps system prompt and options
-branch = conv.fork()        # copy history into a new Conversation
+branch = conv.fork()        # copy history + all callbacks into a new Conversation
 ```
 
 `on_tool_call` receives `(name: str, args: dict)` and should return `True` to proceed or `False` to cancel the tool call.
+
+`on_round_meta` fires after each round with a `ResponseMeta` containing `cost_usd_cents`, `balance_remaining_cents`, `tokens_input`, `tokens_output`, `model_used`, and `request_id` parsed from response headers.
+
+`on_tools_ignored(model)` fires once if you pass `tools` but the model returns no tool calls on the first round — useful for detecting models without native function calling.
 
 To restore a conversation from a previous session:
 
@@ -148,9 +192,22 @@ for part in result.content:
     if part.type == "text":
         print(part.text)
     elif part.type == "image":
-        print(part.mime_type, len(part.data))   # base64-encoded image
+        print(part.mimeType, len(part.data))    # base64-encoded image
     elif part.type == "resource":
         print(part.uri, part.text)
+```
+
+The transport auto-normalizes raw MCP responses: snake_case `mime_type` is aliased to `mimeType`, `imageBase64`/`pngBase64` keys are mapped to `data`, MIME types are sniffed from base64 magic bytes when missing, and JSON-wrapped image/PDF payloads embedded inside text blocks (e.g. `{"imageBase64": "...", "mimeType": "image/png"}`) are promoted to typed `McpImageContent` / `McpResourceContent` automatically.
+
+## Agents
+
+```python
+# Register a new agent — call before you have an API key
+client = LLM4AgentsClient(api_key="")   # empty key is fine for registration
+reg = await client.agents.register("My Agent")
+# The returned api_key is shown only once — save it immediately
+print(reg.api_key)        # sk-proxy-...
+print(reg.uuid)
 ```
 
 ## Wallets
@@ -172,7 +229,7 @@ for tx in txs["transactions"]:
     print(f'{tx["type"]}: ${tx["amount_usd_cents"] / 100} — {tx["description"]}')
 ```
 
-`type` filter accepts `"deposit"`, `"usage"`, or `"refund"`.
+`type` filter accepts `"deposit"`, `"usage"`, `"refund"`, or `"gas_sponsored"`.
 
 ## Gasless Transfers
 
@@ -190,10 +247,11 @@ quote = await client.transfer.quote({
     "chain": "polygon", "token": "USDC",
     "from_": "0xSender...", "to": "0xRecipient...", "amount": "10.50",
 })
-print(f"Fee: {quote['fee_formatted']}")
+print(f"Fee: {quote.fee_formatted}")
+print(f"Forwarder: {quote.forwarder_address}")
 
 result = await client.transfer.submit(quote, "0xPrivateKey...")
-print(result["tx_hash"])
+print(result.tx_hash)
 ```
 
 ## MCP Tools
@@ -263,13 +321,15 @@ Pass these to any LLM that supports function calling, or let `conversation()` ma
 ```python
 result = await client.models.list()
 for m in result.models:
-    print(f"{m['slug']} — ${m['input_price_per_1m']}/1M in, ${m['output_price_per_1m']}/1M out")
+    print(f"{m['slug']} — ${m['inputPricePer1M']}/1M in, ${m['outputPricePer1M']}/1M out")
+    if m.get("feePct") is not None:
+        print(f"  platform fee: {m['feePct']}%")
 
 # Filter by name
 result = await client.models.list(search="claude")
 ```
 
-`models.list()` returns a `ModelListResult` with `.models` (list) and `.request_id` (str | None).
+`models.list()` returns a `ModelListResult` with `.models` (list of dicts) and `.request_id` (str | None). Each model dict contains `slug`, `displayName`, `provider`, `inputPricePer1M`, `outputPricePer1M`, `contextWindow`, `lastSyncedAt`, and an optional `feePct` (platform fee percentage).
 
 ## Error Handling
 
@@ -315,6 +375,18 @@ client = LLM4AgentsClient(
     timeout=30.0,                                   # optional, seconds, default 30
 )
 ```
+
+## What's New in v2.1
+
+- **`Conversation.stream()`** — async generator yielding typed events: `text`, `reasoning`, `tool_call`, `tool_result`, `meta`, `done`. Each round emits a `meta` event with `ResponseMeta` parsed from response headers.
+- **`on_round_meta`** — callback fired per round with `ResponseMeta` (cost, balance, tokens, model used, request id).
+- **`on_tools_ignored(model)`** — callback fired when a model returns no tool calls on the first round despite being given tools — useful for detecting models without native function-calling support.
+- **`agents.register(name)`** — register a new agent and receive its `api_key` (only shown once).
+- **`forwarder_address`** in `QuoteResult` — the EIP-2771 forwarder contract used for the gasless transfer.
+- **Auto-normalization in MCP transport** — JSON-wrapped image/PDF payloads embedded inside text blocks (`{"imageBase64": "..."}`, `{"pngBase64": "..."}`, `{"pdfBase64": "..."}`) are auto-promoted to typed `McpImageContent` / `McpResourceContent`. Snake_case `mime_type` is aliased to `mimeType` and MIME types are sniffed from base64 magic bytes when missing.
+- **Top-level exports** — `from llm4agents import AgentRegistration, ResponseMeta, Conversation, McpToolResult, ...` (all public types now re-exported from the package root).
+- **`Transaction.type`** filter accepts `"gas_sponsored"` in addition to `"deposit"`, `"usage"`, `"refund"`.
+- **`ModelInfo.feePct`** — platform fee percentage now exposed in the model catalog.
 
 ## Migration from v1.x
 
