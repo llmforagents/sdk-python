@@ -667,3 +667,241 @@ async def test_stream_assistant_content_is_string_not_none(http):
     # First assistant message had no text delta → content must be ""
     assert assistant_msgs[0]["content"] == ""
     assert assistant_msgs[0]["content"] is not None
+
+
+# ---------------------------------------------------------------------------
+# Fix 8 (BUG-09): synthesize tool_call.id when provider omits it
+# ---------------------------------------------------------------------------
+
+
+@respx.mock
+async def test_say_synthesizes_id_when_provider_omits_it(http):
+    """Gemini / certain Anthropic models via OpenRouter return tool_calls
+    without an id. The SDK must synthesize one so the matching role:'tool'
+    reply has a valid tool_call_id (otherwise next round breaks)."""
+    tool_response = {
+        "id": "r1",
+        "choices": [{
+            "index": 0,
+            "message": {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [{
+                    # ← no "id" field
+                    "type": "function",
+                    "function": {"name": "google_search", "arguments": '{"q":"x"}'},
+                }],
+                "tool_call_id": None,
+            },
+            "finish_reason": "tool_calls",
+        }],
+        "usage": {"prompt_tokens": 5, "completion_tokens": 2},
+        "model": "gemini-flash",
+    }
+    final_response = {
+        "id": "r2",
+        "choices": [{
+            "index": 0,
+            "message": {"role": "assistant", "content": "Done.", "tool_calls": None, "tool_call_id": None},
+            "finish_reason": "stop",
+        }],
+        "usage": {"prompt_tokens": 8, "completion_tokens": 1},
+        "model": "gemini-flash",
+    }
+
+    call_count = 0
+
+    def side_effect(request):
+        nonlocal call_count
+        call_count += 1
+        return httpx.Response(200, json=tool_response if call_count == 1 else final_response)
+
+    respx.post("https://api.example.com/v1/chat/completions").mock(side_effect=side_effect)
+
+    mock_tools = MagicMock()
+    mock_tools.definitions = [{"name": "google_search", "description": "Search", "inputSchema": {}}]
+    mock_tools.call = AsyncMock(return_value=McpToolResult(
+        content=(McpTextContent(type="text", text="result"),),
+        text="result",
+    ))
+
+    conv = Conversation(http, {"model": "gemini-flash", "tools": mock_tools})
+    await conv.say("search")
+
+    # Assistant message tool_call should have a synthetic id
+    assistant_with_calls = next(
+        m for m in conv.messages
+        if m.get("role") == "assistant" and m.get("tool_calls")
+    )
+    tool_calls = assistant_with_calls["tool_calls"]
+    assert tool_calls[0]["id"], "tool_call should have a non-empty id"
+    assert tool_calls[0]["id"].startswith("auto_")
+
+    # role:'tool' reply must reference the synthetic id
+    tool_msg = next(m for m in conv.messages if m.get("role") == "tool")
+    assert tool_msg["tool_call_id"] == tool_calls[0]["id"]
+    assert tool_msg["tool_call_id"].startswith("auto_")
+
+
+@respx.mock
+async def test_say_preserves_provider_supplied_id(http):
+    """If the provider already supplied an id, the SDK must NOT replace it."""
+    tool_response = {
+        "id": "r1",
+        "choices": [{
+            "index": 0,
+            "message": {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [{
+                    "id": "tc-real-id",
+                    "type": "function",
+                    "function": {"name": "google_search", "arguments": '{"q":"x"}'},
+                }],
+                "tool_call_id": None,
+            },
+            "finish_reason": "tool_calls",
+        }],
+        "usage": {"prompt_tokens": 5, "completion_tokens": 2},
+        "model": "m",
+    }
+    final_response = {
+        "id": "r2",
+        "choices": [{
+            "index": 0,
+            "message": {"role": "assistant", "content": "Done.", "tool_calls": None, "tool_call_id": None},
+            "finish_reason": "stop",
+        }],
+        "usage": {"prompt_tokens": 8, "completion_tokens": 1},
+        "model": "m",
+    }
+    call_count = 0
+
+    def side_effect(request):
+        nonlocal call_count
+        call_count += 1
+        return httpx.Response(200, json=tool_response if call_count == 1 else final_response)
+
+    respx.post("https://api.example.com/v1/chat/completions").mock(side_effect=side_effect)
+
+    mock_tools = MagicMock()
+    mock_tools.definitions = [{"name": "google_search", "description": "Search", "inputSchema": {}}]
+    mock_tools.call = AsyncMock(return_value=McpToolResult(
+        content=(McpTextContent(type="text", text="result"),),
+        text="result",
+    ))
+
+    conv = Conversation(http, {"model": "m", "tools": mock_tools})
+    await conv.say("search")
+
+    tool_msg = next(m for m in conv.messages if m.get("role") == "tool")
+    assert tool_msg["tool_call_id"] == "tc-real-id"
+
+    assistant_with_calls = next(
+        m for m in conv.messages
+        if m.get("role") == "assistant" and m.get("tool_calls")
+    )
+    assert assistant_with_calls["tool_calls"][0]["id"] == "tc-real-id"
+
+
+@respx.mock
+async def test_tool_message_includes_name_field(http):
+    """role:'tool' history entries must include a `name` field as
+    defense-in-depth for legacy providers that key off it."""
+    tool_response = {
+        "id": "r1",
+        "choices": [{
+            "index": 0,
+            "message": {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [{
+                    "id": "tc-1",
+                    "type": "function",
+                    "function": {"name": "google_search", "arguments": '{"q":"x"}'},
+                }],
+                "tool_call_id": None,
+            },
+            "finish_reason": "tool_calls",
+        }],
+        "usage": {"prompt_tokens": 5, "completion_tokens": 2},
+        "model": "m",
+    }
+    final_response = {
+        "id": "r2",
+        "choices": [{
+            "index": 0,
+            "message": {"role": "assistant", "content": "Done.", "tool_calls": None, "tool_call_id": None},
+            "finish_reason": "stop",
+        }],
+        "usage": {"prompt_tokens": 8, "completion_tokens": 1},
+        "model": "m",
+    }
+    call_count = 0
+
+    def side_effect(request):
+        nonlocal call_count
+        call_count += 1
+        return httpx.Response(200, json=tool_response if call_count == 1 else final_response)
+
+    respx.post("https://api.example.com/v1/chat/completions").mock(side_effect=side_effect)
+
+    mock_tools = MagicMock()
+    mock_tools.definitions = [{"name": "google_search", "description": "Search", "inputSchema": {}}]
+    mock_tools.call = AsyncMock(return_value=McpToolResult(
+        content=(McpTextContent(type="text", text="result"),),
+        text="result",
+    ))
+
+    conv = Conversation(http, {"model": "m", "tools": mock_tools})
+    await conv.say("search")
+
+    tool_msg = next(m for m in conv.messages if m.get("role") == "tool")
+    assert tool_msg.get("name") == "google_search"
+
+
+@respx.mock
+async def test_stream_synthesizes_id_when_streaming_chunks_omit_it(http):
+    """Stream() must also synthesize ids when SSE chunks omit tool_call.id."""
+    # Streaming round whose tool_call delta has no id
+    sse_body = (
+        'data: {"id":"c1","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"type":"function","function":{"name":"google_search","arguments":"{\\"q\\":\\"x\\"}"}}]},"finish_reason":null}]}\n\n'
+        'data: {"id":"c1","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":5,"completion_tokens":2}}\n\n'
+        "data: [DONE]\n\n"
+    )
+    sse_final = (
+        'data: {"id":"c2","choices":[{"index":0,"delta":{"content":"Done."},"finish_reason":null}]}\n\n'
+        'data: {"id":"c2","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}\n\n'
+        "data: [DONE]\n\n"
+    )
+    call_count = 0
+
+    def side_effect(request):
+        nonlocal call_count
+        call_count += 1
+        body = sse_body if call_count == 1 else sse_final
+        return httpx.Response(200, content=body.encode(), headers={"content-type": "text/event-stream"})
+
+    respx.post("https://api.example.com/v1/chat/completions").mock(side_effect=side_effect)
+
+    mock_tools = MagicMock()
+    mock_tools.definitions = [{"name": "google_search", "description": "Search", "inputSchema": {}}]
+    mock_tools.call = AsyncMock(return_value=McpToolResult(
+        content=(McpTextContent(type="text", text="result"),),
+        text="result",
+    ))
+
+    conv = Conversation(http, {"model": "m", "tools": mock_tools})
+    async for _ in conv.stream("search"):
+        pass
+
+    assistant_with_calls = next(
+        m for m in conv.messages
+        if m.get("role") == "assistant" and m.get("tool_calls")
+    )
+    tool_calls = assistant_with_calls["tool_calls"]
+    assert tool_calls[0]["id"].startswith("auto_")
+
+    tool_msg = next(m for m in conv.messages if m.get("role") == "tool")
+    assert tool_msg["tool_call_id"] == tool_calls[0]["id"]
+    assert tool_msg["tool_call_id"].startswith("auto_")

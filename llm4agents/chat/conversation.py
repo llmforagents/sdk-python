@@ -1,5 +1,6 @@
 from __future__ import annotations
 import json
+import time
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from typing import Any, Callable
@@ -10,6 +11,24 @@ from llm4agents.chat.prompt_fallback import (
     parse_tool_calls_from_text,
 )
 from llm4agents.errors import LLM4AgentsError
+
+
+def _normalize_tool_calls(
+    tool_calls: list[dict[str, Any]], round_count: int
+) -> list[dict[str, Any]]:
+    """Synthesize id when provider omits it. Some providers (Gemini, certain
+    Anthropic models via OpenRouter) return tool_calls without an id, which
+    breaks the next round because role:'tool' messages need tool_call_id."""
+    out: list[dict[str, Any]] = []
+    for i, tc in enumerate(tool_calls):
+        existing_id = tc.get("id")
+        if not existing_id:
+            new_tc = dict(tc)
+            new_tc["id"] = f"auto_{round_count}_{i}_{int(time.time() * 1000)}"
+            out.append(new_tc)
+        else:
+            out.append(tc)
+    return out
 
 
 @dataclass(frozen=True)
@@ -117,6 +136,13 @@ class Conversation:
             # messages[*].content stays a string for strict backends.
             if msg.get("content") is None:
                 msg = {**msg, "content": ""}
+            # BUG-09: synthesize tool_call.id when provider omits it
+            # (Gemini, certain Anthropic models via OpenRouter). Without an id
+            # the matching role:'tool' reply lacks tool_call_id and breaks
+            # the next round.
+            existing_tcs = msg.get("tool_calls")
+            if existing_tcs:
+                msg = {**msg, "tool_calls": _normalize_tool_calls(existing_tcs, round_count)}
             self._history.append(msg)
 
             raw_tool_calls: list[dict[str, Any]] = msg.get("tool_calls") or []
@@ -201,6 +227,7 @@ class Conversation:
                 "content": result.text,
                 "tool_calls": None,
                 "tool_call_id": tc.get("id"),
+                "name": name,
             }
         )
 
@@ -302,20 +329,33 @@ class Conversation:
 
             tool_calls_list = list(pending_tool_calls.values())
 
-            # BUG-08: assistant message content stays a plain string.
-            # Always coerce to str so the next request can include it as a
-            # valid messages[*].content entry.
-            assistant_msg: ChatMessage = {
-                "role": "assistant",
-                "content": streamed_content,
-                "tool_calls": [
+            # BUG-09: normalize streamed tool_calls — providers like Gemini
+            # may emit chunks without id, leading to empty tool_call_id on
+            # the matching role:'tool' message and a broken next round.
+            normalized_tool_calls = _normalize_tool_calls(
+                [
                     {
                         "id": tc["id"],
                         "type": "function",
                         "function": {"name": tc["name"], "arguments": tc["args"]},
                     }
                     for tc in tool_calls_list
-                ] or None,
+                ],
+                round_count,
+            )
+            # Sync synthesized ids back into tool_calls_list so the matching
+            # role:'tool' history entries get the same tool_call_id we put on
+            # the assistant message.
+            for tc, norm in zip(tool_calls_list, normalized_tool_calls):
+                tc["id"] = norm["id"]
+
+            # BUG-08: assistant message content stays a plain string.
+            # Always coerce to str so the next request can include it as a
+            # valid messages[*].content entry.
+            assistant_msg: ChatMessage = {
+                "role": "assistant",
+                "content": streamed_content,
+                "tool_calls": normalized_tool_calls or None,
                 "tool_call_id": None,
             }
             self._history.append(assistant_msg)
@@ -390,6 +430,7 @@ class Conversation:
                                 "content": result.text,
                                 "tool_calls": None,
                                 "tool_call_id": tc.get("id"),
+                                "name": name,
                             }
                         )
                         yield {"type": "tool_result", "name": name, "result": result}
@@ -454,6 +495,7 @@ class Conversation:
                         "content": result.text,
                         "tool_calls": None,
                         "tool_call_id": tc.get("id"),
+                        "name": name,
                     }
                 )
                 yield {"type": "tool_result", "name": name, "result": result}
