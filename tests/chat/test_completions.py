@@ -3,7 +3,7 @@ import respx
 import httpx
 from llm4agents.transport.http import HttpTransport
 from llm4agents.chat.completions import ChatCompletions
-from llm4agents.chat.types import ChatResponse, StreamChunk
+from llm4agents.chat.types import ChatResponse, FinalUsage, StreamChunk
 
 
 @pytest.fixture
@@ -53,3 +53,35 @@ async def test_create_streaming(completions):
     assert len(chunks) == 2
     assert isinstance(chunks[0], StreamChunk)
     assert chunks[0].choices[0]["delta"]["content"] == "Hi"
+
+
+# Fix 6 (BUG-05): on_final_usage callback fires after the SSE stream ends.
+
+@respx.mock
+async def test_on_final_usage_callback_fires_after_stream(completions):
+    """If the stream emits a final usage chunk, ``on_final_usage`` is called once."""
+    sse_body = (
+        'data: {"id":"s1","choices":[{"index":0,"delta":{"content":"Hello"},"finish_reason":null}]}\n\n'
+        'data: {"id":"s1","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":11,"completion_tokens":4,"reasoning_tokens":3}}\n\n'
+        "data: [DONE]\n\n"
+    )
+    respx.post("https://api.example.com/v1/chat/completions").mock(
+        return_value=httpx.Response(200, text=sse_body, headers={"content-type": "text/event-stream"})
+    )
+
+    received: list[FinalUsage] = []
+
+    stream = await completions.create(
+        {"model": "gpt-4o", "messages": [], "stream": True},
+        on_final_usage=received.append,
+    )
+    async for _ in stream:
+        pass
+
+    assert len(received) == 1
+    fu = received[0]
+    assert isinstance(fu, FinalUsage)
+    assert fu.prompt_tokens == 11
+    assert fu.completion_tokens == 4
+    assert fu.total_tokens == 15
+    assert fu.reasoning_tokens == 3

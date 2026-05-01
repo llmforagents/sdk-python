@@ -1,10 +1,14 @@
 from __future__ import annotations
 import json
 from collections.abc import AsyncIterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Callable
 from llm4agents.transport.http import HttpTransport
 from llm4agents.chat.types import ChatMessage, ResponseMeta
+from llm4agents.chat.prompt_fallback import (
+    format_tools_for_prompt,
+    parse_tool_calls_from_text,
+)
 from llm4agents.errors import LLM4AgentsError
 
 
@@ -12,7 +16,7 @@ from llm4agents.errors import LLM4AgentsError
 class ConversationResponse:
     content: str
     tool_calls: list[dict[str, Any]]
-    usage: dict[str, int]
+    usage: dict[str, int] = field(default_factory=dict)
 
 
 class Conversation:
@@ -25,6 +29,9 @@ class Conversation:
         self._on_tool_result: Callable[[str, Any], None] | None = opts.get("on_tool_result")
         self._on_round_meta: Callable[[ResponseMeta], None] | None = opts.get("on_round_meta")
         self._on_tools_ignored: Callable[[str], None] | None = opts.get("on_tools_ignored")
+        self._enable_prompt_tool_fallback: bool = bool(
+            opts.get("enable_prompt_tool_fallback", False)
+        )
         self._max_tool_rounds: int = opts.get("max_tool_rounds", 10)
         self._history: list[ChatMessage] = list(opts.get("history", []))
         self._tool_rounds: int = 0
@@ -42,6 +49,7 @@ class Conversation:
             "model": self._model,
             "max_tool_rounds": self._max_tool_rounds,
             "history": list(self._history),
+            "enable_prompt_tool_fallback": self._enable_prompt_tool_fallback,
         }
         if self._system is not None:
             opts["system"] = self._system
@@ -72,43 +80,91 @@ class Conversation:
         )
 
         all_tool_calls: list[dict[str, Any]] = []
-        final_usage: dict[str, int] = {}
+        total_prompt_tokens = 0
+        total_completion_tokens = 0
+        total_reasoning_tokens = 0
         round_count = 0
 
         while True:
+            tool_defs: list[dict[str, Any]] | None = None
+            if self._tools is not None:
+                if not self._tools.definitions:
+                    await self._tools.fetch_definitions()
+                tool_defs = list(self._tools.definitions)
+
             params: dict[str, Any] = {
                 "model": self._model,
                 "messages": self._build_messages(),
             }
-            tools_sent = False
-            if self._tools is not None:
-                if not self._tools.definitions:
-                    await self._tools.fetch_definitions()
-                params["tools"] = self._tools.definitions
-                tools_sent = True
+            if tool_defs:
+                params["tools"] = tool_defs
 
             data, headers = await self._http.post_with_meta("/v1/chat/completions", params)
 
             if self._on_round_meta is not None:
                 self._on_round_meta(ResponseMeta.from_headers(headers))
 
+            usage: dict[str, Any] = data.get("usage") or {}
+            total_prompt_tokens += int(usage.get("prompt_tokens", 0) or 0)
+            total_completion_tokens += int(usage.get("completion_tokens", 0) or 0)
+            r_tok = usage.get("reasoning_tokens")
+            if r_tok is not None:
+                total_reasoning_tokens += int(r_tok)
+
             choice = data["choices"][0]
             msg: ChatMessage = choice["message"]
-            usage: dict[str, int] = data.get("usage") or {}
-            final_usage = usage
-            finish_reason: str = choice.get("finish_reason", "stop")
-
+            # BUG-08: normalize content: null → "" so the next request's
+            # messages[*].content stays a string for strict backends.
+            if msg.get("content") is None:
+                msg = {**msg, "content": ""}
             self._history.append(msg)
 
             raw_tool_calls: list[dict[str, Any]] = msg.get("tool_calls") or []
 
-            if not raw_tool_calls or finish_reason == "stop":
-                if round_count == 0 and tools_sent and not raw_tool_calls and self._on_tools_ignored is not None:
+            if not raw_tool_calls:
+                ignored_tools = round_count == 0 and bool(tool_defs)
+                if ignored_tools and self._on_tools_ignored is not None:
                     self._on_tools_ignored(self._model)
+
+                # Prompt-mode fallback: retry round 0 with tools described
+                # in the system prompt, then parse <tool_call> blocks.
+                if ignored_tools and self._enable_prompt_tool_fallback and tool_defs:
+                    fb = await self._run_prompt_fallback_round(tool_defs)
+                    total_prompt_tokens += fb["usage"]["prompt_tokens"]
+                    total_completion_tokens += fb["usage"]["completion_tokens"]
+                    if fb["usage"].get("reasoning_tokens") is not None:
+                        total_reasoning_tokens += fb["usage"]["reasoning_tokens"]
+
+                    if fb["tool_calls"]:
+                        # Replace the ignored assistant message with the prompt-mode one
+                        self._history.pop()
+                        self._history.append(fb["assistant_message"])
+                        for tc in fb["tool_calls"]:
+                            await self._execute_tool_call(tc, all_tool_calls)
+                        round_count += 1
+                        self._check_tool_limit()
+                        self._tool_rounds += 1
+                        continue
+
+                    # Fallback also produced no tool calls → return prompt-mode text
+                    self._history.pop()
+                    self._history.append(fb["assistant_message"])
+                    return ConversationResponse(
+                        content=fb["text_without_blocks"],
+                        tool_calls=all_tool_calls,
+                        usage=self._build_usage_dict(
+                            total_prompt_tokens, total_completion_tokens, total_reasoning_tokens
+                        ),
+                    )
+
+                content_val = msg.get("content")
+                content_str = content_val if isinstance(content_val, str) else ""
                 return ConversationResponse(
-                    content=msg.get("content") or "",
+                    content=content_str,
                     tool_calls=all_tool_calls,
-                    usage=final_usage,
+                    usage=self._build_usage_dict(
+                        total_prompt_tokens, total_completion_tokens, total_reasoning_tokens
+                    ),
                 )
 
             self._check_tool_limit()
@@ -116,34 +172,37 @@ class Conversation:
             round_count += 1
 
             for tc in raw_tool_calls:
-                fn = tc["function"]
-                name: str = fn["name"]
-                try:
-                    args = json.loads(fn.get("arguments") or "{}")
-                except json.JSONDecodeError:
-                    args = {}
+                await self._execute_tool_call(tc, all_tool_calls)
 
-                if self._on_tool_call is not None:
-                    should_continue = self._on_tool_call(name, args)
-                    if not should_continue:
-                        return ConversationResponse(
-                            content="",
-                            tool_calls=all_tool_calls,
-                            usage=final_usage,
-                        )
+    async def _execute_tool_call(
+        self, tc: dict[str, Any], all_tool_calls: list[dict[str, Any]]
+    ) -> None:
+        fn = tc["function"]
+        name: str = fn["name"]
+        try:
+            args = json.loads(fn.get("arguments") or "{}")
+        except json.JSONDecodeError:
+            args = {}
 
-                result = await self._tools.call(name, args)
+        if self._on_tool_call is not None:
+            should_continue = self._on_tool_call(name, args)
+            if not should_continue:
+                return
 
-                if self._on_tool_result is not None:
-                    self._on_tool_result(name, result)
+        result = await self._tools.call(name, args)
 
-                all_tool_calls.append({"name": name, "args": args, "result": result})
-                self._history.append({
-                    "role": "tool",
-                    "content": result.text,
-                    "tool_calls": None,
-                    "tool_call_id": tc.get("id"),
-                })
+        if self._on_tool_result is not None:
+            self._on_tool_result(name, result)
+
+        all_tool_calls.append({"name": name, "args": args, "result": result})
+        self._history.append(
+            {
+                "role": "tool",
+                "content": result.text,
+                "tool_calls": None,
+                "tool_call_id": tc.get("id"),
+            }
+        )
 
     async def stream(self, message: str) -> AsyncIterator[dict[str, Any]]:
         """Async generator that yields stream events.
@@ -154,6 +213,7 @@ class Conversation:
           {"type": "tool_call", "name": str, "args": dict}
           {"type": "tool_result", "name": str, "result": McpToolResult}
           {"type": "meta", "meta": ResponseMeta}
+          {"type": "fallback", "reason": "tools_ignored", "model": str}
           {"type": "done", "response": {"content": str, "tool_calls": list, "usage": dict}}
         """
         self._history.append(
@@ -161,21 +221,26 @@ class Conversation:
         )
 
         all_tool_calls: list[dict[str, Any]] = []
+        total_prompt_tokens = 0
+        total_completion_tokens = 0
+        total_reasoning_tokens = 0
         round_count = 0
         full_content = ""
 
         while True:
+            tool_defs: list[dict[str, Any]] | None = None
+            if self._tools is not None:
+                if not self._tools.definitions:
+                    await self._tools.fetch_definitions()
+                tool_defs = list(self._tools.definitions)
+
             params: dict[str, Any] = {
                 "model": self._model,
                 "messages": self._build_messages(),
                 "stream": True,
             }
-            tools_sent = False
-            if self._tools is not None:
-                if not self._tools.definitions:
-                    await self._tools.fetch_definitions()
-                params["tools"] = self._tools.definitions
-                tools_sent = True
+            if tool_defs:
+                params["tools"] = tool_defs
 
             headers, sse_stream = await self._http.post_stream_with_meta(
                 "/v1/chat/completions", params
@@ -223,6 +288,13 @@ class Conversation:
                 if chunk.get("usage"):
                     chunk_usage = chunk["usage"]
 
+            if chunk_usage:
+                total_prompt_tokens += int(chunk_usage.get("prompt_tokens", 0) or 0)
+                total_completion_tokens += int(chunk_usage.get("completion_tokens", 0) or 0)
+                r_tok = chunk_usage.get("reasoning_tokens")
+                if r_tok is not None:
+                    total_reasoning_tokens += int(r_tok)
+
             round_meta = ResponseMeta.from_headers(headers)
             yield {"type": "meta", "meta": round_meta}
             if self._on_round_meta is not None:
@@ -230,10 +302,12 @@ class Conversation:
 
             tool_calls_list = list(pending_tool_calls.values())
 
-            # Build assistant message
+            # BUG-08: assistant message content stays a plain string.
+            # Always coerce to str so the next request can include it as a
+            # valid messages[*].content entry.
             assistant_msg: ChatMessage = {
                 "role": "assistant",
-                "content": streamed_content or None,
+                "content": streamed_content,
                 "tool_calls": [
                     {
                         "id": tc["id"],
@@ -247,20 +321,93 @@ class Conversation:
             self._history.append(assistant_msg)
 
             if not tool_calls_list:
-                if round_count == 0 and tools_sent and self._on_tools_ignored is not None:
+                ignored_tools = round_count == 0 and bool(tool_defs)
+                if ignored_tools and self._on_tools_ignored is not None:
                     self._on_tools_ignored(self._model)
-                usage_dict: dict[str, int] = {}
-                if chunk_usage:
-                    usage_dict = {
-                        "prompt_tokens": chunk_usage.get("prompt_tokens", 0),
-                        "completion_tokens": chunk_usage.get("completion_tokens", 0),
-                    }
+
+                # Prompt-mode fallback (non-streamed): rerun round 0 with tools
+                # injected into the system prompt, then execute parsed calls.
+                if ignored_tools and self._enable_prompt_tool_fallback and tool_defs:
+                    yield {"type": "fallback", "reason": "tools_ignored", "model": self._model}
+
+                    self._history.pop()  # drop the failed first attempt
+                    fb = await self._run_prompt_fallback_round(tool_defs)
+                    total_prompt_tokens += fb["usage"]["prompt_tokens"]
+                    total_completion_tokens += fb["usage"]["completion_tokens"]
+                    if fb["usage"].get("reasoning_tokens") is not None:
+                        total_reasoning_tokens += fb["usage"]["reasoning_tokens"]
+                    self._history.append(fb["assistant_message"])
+
+                    if not fb["tool_calls"]:
+                        yield {"type": "text", "content": fb["text_without_blocks"]}
+                        yield {
+                            "type": "done",
+                            "response": {
+                                "content": fb["text_without_blocks"],
+                                "tool_calls": all_tool_calls,
+                                "usage": self._build_usage_dict(
+                                    total_prompt_tokens,
+                                    total_completion_tokens,
+                                    total_reasoning_tokens,
+                                ),
+                            },
+                        }
+                        return
+
+                    for tc in fb["tool_calls"]:
+                        fn = tc["function"]
+                        name = fn["name"]
+                        try:
+                            args = json.loads(fn.get("arguments") or "{}")
+                        except json.JSONDecodeError:
+                            args = {}
+                        yield {"type": "tool_call", "name": name, "args": args}
+
+                        if self._on_tool_call is not None:
+                            should_continue = self._on_tool_call(name, args)
+                            if not should_continue:
+                                yield {
+                                    "type": "done",
+                                    "response": {
+                                        "content": full_content,
+                                        "tool_calls": all_tool_calls,
+                                        "usage": self._build_usage_dict(
+                                            total_prompt_tokens,
+                                            total_completion_tokens,
+                                            total_reasoning_tokens,
+                                        ),
+                                    },
+                                }
+                                return
+
+                        result = await self._tools.call(name, args)
+                        if self._on_tool_result is not None:
+                            self._on_tool_result(name, result)
+                        all_tool_calls.append({"name": name, "args": args, "result": result})
+                        self._history.append(
+                            {
+                                "role": "tool",
+                                "content": result.text,
+                                "tool_calls": None,
+                                "tool_call_id": tc.get("id"),
+                            }
+                        )
+                        yield {"type": "tool_result", "name": name, "result": result}
+
+                    round_count += 1
+                    self._check_tool_limit()
+                    self._tool_rounds += 1
+                    full_content = ""
+                    continue
+
                 yield {
                     "type": "done",
                     "response": {
                         "content": full_content,
                         "tool_calls": all_tool_calls,
-                        "usage": usage_dict,
+                        "usage": self._build_usage_dict(
+                            total_prompt_tokens, total_completion_tokens, total_reasoning_tokens
+                        ),
                     },
                 }
                 return
@@ -286,7 +433,11 @@ class Conversation:
                             "response": {
                                 "content": full_content,
                                 "tool_calls": all_tool_calls,
-                                "usage": {},
+                                "usage": self._build_usage_dict(
+                                    total_prompt_tokens,
+                                    total_completion_tokens,
+                                    total_reasoning_tokens,
+                                ),
                             },
                         }
                         return
@@ -297,12 +448,14 @@ class Conversation:
                     self._on_tool_result(name, result)
 
                 all_tool_calls.append({"name": name, "args": args, "result": result})
-                self._history.append({
-                    "role": "tool",
-                    "content": result.text,
-                    "tool_calls": None,
-                    "tool_call_id": tc.get("id"),
-                })
+                self._history.append(
+                    {
+                        "role": "tool",
+                        "content": result.text,
+                        "tool_calls": None,
+                        "tool_call_id": tc.get("id"),
+                    }
+                )
                 yield {"type": "tool_result", "name": name, "result": result}
 
             # Image short-circuit
@@ -317,17 +470,94 @@ class Conversation:
                     "response": {
                         "content": full_content,
                         "tool_calls": all_tool_calls,
-                        "usage": {},
+                        "usage": self._build_usage_dict(
+                            total_prompt_tokens, total_completion_tokens, total_reasoning_tokens
+                        ),
                     },
                 }
                 return
 
             full_content = ""
 
+    async def _run_prompt_fallback_round(
+        self, tool_defs: list[dict[str, Any]]
+    ) -> dict[str, Any]:
+        """Run a single non-streamed round with tools described in the system prompt.
+
+        Parses ``<tool_call>...</tool_call>`` blocks from the model's reply and
+        returns the assistant message (always with ``content`` as a string),
+        the parsed tool calls, the text minus the blocks, and the round usage.
+        """
+        prompt_tools_block = format_tools_for_prompt(tool_defs)
+        augmented_system = (
+            f"{self._system}\n\n{prompt_tools_block}"
+            if self._system
+            else prompt_tools_block
+        )
+        messages: list[ChatMessage] = [
+            {
+                "role": "system",
+                "content": augmented_system,
+                "tool_calls": None,
+                "tool_call_id": None,
+            },
+            *self._history,
+        ]
+        params: dict[str, Any] = {"model": self._model, "messages": messages}
+
+        data, headers = await self._http.post_with_meta("/v1/chat/completions", params)
+
+        if self._on_round_meta is not None:
+            self._on_round_meta(ResponseMeta.from_headers(headers))
+
+        choice = data["choices"][0]
+        raw_content = choice["message"].get("content")
+        text = raw_content if isinstance(raw_content, str) else ""
+        tool_calls, text_without_blocks = parse_tool_calls_from_text(text)
+
+        # BUG-08: content stays a string even when tool_calls are present.
+        assistant_message: ChatMessage = {
+            "role": "assistant",
+            "content": text_without_blocks,
+            "tool_calls": tool_calls or None,
+            "tool_call_id": None,
+        }
+
+        usage: dict[str, Any] = data.get("usage") or {}
+        usage_out: dict[str, int | None] = {
+            "prompt_tokens": int(usage.get("prompt_tokens", 0) or 0),
+            "completion_tokens": int(usage.get("completion_tokens", 0) or 0),
+        }
+        r_tok = usage.get("reasoning_tokens")
+        usage_out["reasoning_tokens"] = int(r_tok) if r_tok is not None else None
+
+        return {
+            "assistant_message": assistant_message,
+            "tool_calls": tool_calls,
+            "text_without_blocks": text_without_blocks,
+            "usage": usage_out,
+        }
+
+    @staticmethod
+    def _build_usage_dict(prompt: int, completion: int, reasoning: int) -> dict[str, int]:
+        out: dict[str, int] = {
+            "prompt_tokens": prompt,
+            "completion_tokens": completion,
+            "total_tokens": prompt + completion,
+        }
+        if reasoning > 0:
+            out["reasoning_tokens"] = reasoning
+        return out
+
     def _build_messages(self) -> list[ChatMessage]:
         if self._system:
             return [
-                {"role": "system", "content": self._system, "tool_calls": None, "tool_call_id": None},
+                {
+                    "role": "system",
+                    "content": self._system,
+                    "tool_calls": None,
+                    "tool_call_id": None,
+                },
                 *self._history,
             ]
         return list(self._history)

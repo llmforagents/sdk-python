@@ -177,3 +177,48 @@ def test_sniff_mime_type_webp():
 
 def test_sniff_mime_type_default():
     assert sniff_mime_type("AAAA") == "image/png"
+
+
+# Fix 2 (BUG-01): Streamable HTTP MCP servers reject requests without an Accept
+# header that includes ``text/event-stream`` (HTTP 406). The SDK must always
+# send ``Accept: application/json, text/event-stream``.
+
+@respx.mock
+async def test_mcp_sends_accept_header_on_list_tools(mcp):
+    captured_headers = {}
+
+    def side_effect(request):
+        captured_headers.update(dict(request.headers))
+        return httpx.Response(200, json={
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {"tools": []},
+        })
+
+    respx.post("https://mcp.example.com/mcp").mock(side_effect=side_effect)
+    await mcp.list_tools()
+
+    accept = captured_headers.get("accept") or captured_headers.get("Accept")
+    assert accept is not None
+    assert "application/json" in accept
+    assert "text/event-stream" in accept
+
+
+@respx.mock
+async def test_mcp_sends_accept_header_on_call_tool(mcp):
+    captured_headers = {}
+
+    def side_effect(request):
+        captured_headers.update(dict(request.headers))
+        return httpx.Response(200, json={
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {"content": [{"type": "text", "text": "ok"}]},
+        })
+
+    respx.post("https://mcp.example.com/mcp").mock(side_effect=side_effect)
+    await mcp.call_tool("echo", {})
+
+    accept = captured_headers.get("accept") or captured_headers.get("Accept")
+    assert accept is not None
+    assert "text/event-stream" in accept

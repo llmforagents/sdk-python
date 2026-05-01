@@ -1,7 +1,7 @@
 from llm4agents.client import LLM4AgentsClient
 from llm4agents.errors import LLM4AgentsError, ErrorCode
 from llm4agents.agents import Agents, AgentRegistration, AgentRegistrationParams
-from llm4agents.chat.types import ResponseMeta, ChatMessage, ChatResponse, StreamChunk
+from llm4agents.chat.types import ResponseMeta, ChatMessage, ChatResponse, StreamChunk, FinalUsage
 from llm4agents.chat.conversation import Conversation, ConversationResponse
 from llm4agents.wallets.types import (
     WalletInfo,
@@ -30,6 +30,7 @@ __all__ = [
     "ChatMessage",
     "ChatResponse",
     "StreamChunk",
+    "FinalUsage",
     "Conversation",
     "ConversationResponse",
     "WalletInfo",
