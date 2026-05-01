@@ -20,6 +20,7 @@ _MCP_TIMEOUT = 60.0
 class ModelListResult:
     models: list[dict[str, Any]]
     request_id: str | None
+    fee_pct: int | None = None
 
 
 class _ChatNamespace:
@@ -37,9 +38,10 @@ class _ModelsNamespace:
 
     async def list(self, search: str | None = None) -> ModelListResult:
         params: dict[str, str] | None = {"search": search} if search else None
-        data = await self._http.get("/api/v1/models/", params=params)
+        data = await self._http.get("/api/v1/models", params=params)
         return ModelListResult(
             models=data.get("models", []),
+            fee_pct=data.get("feePct"),
             request_id=data.get("requestId"),
         )
 

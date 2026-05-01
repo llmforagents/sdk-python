@@ -19,6 +19,7 @@ class ResponseMeta:
     balance_remaining_cents: int | None
     tokens_input: int | None
     tokens_output: int | None
+    tokens_reasoning: int | None = None
 
     @classmethod
     def from_headers(cls, headers: httpx.Headers) -> ResponseMeta:
@@ -38,7 +39,23 @@ class ResponseMeta:
             balance_remaining_cents=parse_int("x-balance-remaining-cents"),
             tokens_input=parse_int("x-tokens-input"),
             tokens_output=parse_int("x-tokens-output"),
+            tokens_reasoning=parse_int("x-tokens-reasoning"),
         )
+
+
+@dataclass(frozen=True)
+class FinalUsage:
+    """Final usage stats fired after a streaming completion ends.
+
+    Some providers (and OpenAI's `stream_options: { include_usage: true }`) emit
+    a final SSE chunk containing token totals. The SDK tracks the last `usage`
+    block seen and fires ``on_final_usage`` once the stream completes.
+    """
+
+    prompt_tokens: int
+    completion_tokens: int
+    total_tokens: int
+    reasoning_tokens: int | None = None
 
 
 @dataclass(frozen=True)

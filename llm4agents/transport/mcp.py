@@ -123,6 +123,7 @@ class McpTransport:
         self._headers = {
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
+            "Accept": "application/json, text/event-stream",
         }
         self._timeout = timeout
         self._tools_cache: list[dict[str, Any]] | None = None

@@ -69,13 +69,21 @@ response = await client.chat.completions.create({
 print(response["choices"][0]["message"]["content"])
 
 # Streaming
-stream = await client.chat.completions.create({
-    "model": "anthropic/claude-sonnet-4",
-    "messages": [{"role": "user", "content": "Count to 10"}],
-    "stream": True,
-})
+from llm4agents import FinalUsage
+
+def on_final_usage(usage: FinalUsage) -> None:
+    print(f"\n[usage] prompt={usage.prompt_tokens} completion={usage.completion_tokens} total={usage.total_tokens}")
+
+stream = await client.chat.completions.create(
+    {
+        "model": "anthropic/claude-sonnet-4",
+        "messages": [{"role": "user", "content": "Count to 10"}],
+        "stream": True,
+    },
+    on_final_usage=on_final_usage,   # fires once after the stream ends
+)
 async for chunk in stream:
-    print(chunk["choices"][0]["delta"].get("content", ""), end="", flush=True)
+    print(chunk.choices[0]["delta"].get("content", ""), end="", flush=True)
 
 # With extended thinking
 response = await client.chat.completions.create({
@@ -132,6 +140,7 @@ conv = client.chat.conversation({
     "on_tool_result": lambda name, result: print(f"{name}: {result.text[:80]}"),
     "on_round_meta": on_round_meta,
     "on_tools_ignored": lambda model: print(f"WARN: {model} ignored tools"),
+    "enable_prompt_tool_fallback": True,   # retry round 0 with tools in prompt
     "max_tool_rounds": 5,         # default 10
 })
 
@@ -164,9 +173,13 @@ branch = conv.fork()        # copy history + all callbacks into a new Conversati
 
 `on_tool_call` receives `(name: str, args: dict)` and should return `True` to proceed or `False` to cancel the tool call.
 
-`on_round_meta` fires after each round with a `ResponseMeta` containing `cost_usd_cents`, `balance_remaining_cents`, `tokens_input`, `tokens_output`, `model_used`, and `request_id` parsed from response headers.
+`on_round_meta` fires after each round with a `ResponseMeta` containing `cost_usd_cents`, `balance_remaining_cents`, `tokens_input`, `tokens_output`, `tokens_reasoning`, `model_used`, and `request_id` parsed from response headers.
 
 `on_tools_ignored(model)` fires once if you pass `tools` but the model returns no tool calls on the first round — useful for detecting models without native function calling.
+
+`enable_prompt_tool_fallback=True` adds an automatic recovery path for those models. When round 0 ignores tools, the SDK retries the round once with the tool definitions injected into the system prompt and asks the model to emit `<tool_call>{"name":"...","arguments":{...}}</tool_call>` blocks. Parsed blocks are executed exactly like native tool calls, so the rest of the loop is unchanged. In `stream()` you'll see a `{"type": "fallback", "reason": "tools_ignored", "model": ...}` event before the fallback round runs (the fallback round itself is non-streamed). If the fallback also returns no blocks, its plain-text reply is returned as the answer.
+
+`ConversationResponse.usage` includes `prompt_tokens`, `completion_tokens`, `total_tokens`, and (when the upstream model exposes them) `reasoning_tokens` accumulated across every round, including any fallback round.
 
 To restore a conversation from a previous session:
 
@@ -329,7 +342,7 @@ for m in result.models:
 result = await client.models.list(search="claude")
 ```
 
-`models.list()` returns a `ModelListResult` with `.models` (list of dicts) and `.request_id` (str | None). Each model dict contains `slug`, `displayName`, `provider`, `inputPricePer1M`, `outputPricePer1M`, `contextWindow`, `lastSyncedAt`, and an optional `feePct` (platform fee percentage).
+`models.list()` returns a `ModelListResult` with `.models` (list of dicts), `.fee_pct` (int | None — the agent's platform fee percentage, applied to every billed call), and `.request_id` (str | None). Each model dict contains `slug`, `displayName`, `provider`, `inputPricePer1M`, `outputPricePer1M`, `contextWindow`, `lastSyncedAt`, and an optional `feePct` (platform fee percentage).
 
 ## Error Handling
 
@@ -375,6 +388,18 @@ client = LLM4AgentsClient(
     timeout=30.0,                                   # optional, seconds, default 30
 )
 ```
+
+## What's New in v2.3
+
+This release brings the Python SDK to feature parity with the TypeScript SDK at v2.3.1. Seven fixes that an external playground audit flagged as real-world breakages:
+
+- **Prompt-mode tool fallback** (`enable_prompt_tool_fallback=True`) — when a model ignores native `tools` on round 0, the SDK retries the round with the tool definitions injected into the system prompt and parses `<tool_call>{"name":"...","arguments":{...}}</tool_call>` blocks from the response. Recovers tool use on models without native function calling. `stream()` emits a `{"type": "fallback", "reason": "tools_ignored", "model": ...}` event before the fallback round.
+- **MCP `Accept` header** — MCP `rpc` requests now send `Accept: application/json, text/event-stream`. Streamable HTTP MCP servers were rejecting every tool call with HTTP 406 without it.
+- **Models endpoint trailing slash** — `client.models.list()` now hits `/api/v1/models` (no trailing slash), matching the deployed API.
+- **`reasoning_tokens` propagation** — `ConversationResponse.usage["reasoning_tokens"]` now accumulates across all rounds, and `ResponseMeta.tokens_reasoning` exposes the per-round value parsed from the `x-tokens-reasoning` header.
+- **`fee_pct` in `ModelListResult`** — the platform fee percentage returned by the API is now surfaced as `result.fee_pct: int | None`.
+- **`on_final_usage` callback in streaming completions** — `chat.completions.create(params, on_final_usage=cb)` fires `cb(FinalUsage(prompt_tokens, completion_tokens, total_tokens, reasoning_tokens))` once after the SSE stream ends, using the last `usage` chunk emitted by providers that send `stream_options: {include_usage: true}`.
+- **Assistant `content: null` normalization** — when a model returns `content: null` for a tool-only message (OpenAI / Gemini convention), the SDK now normalizes it to `""` before pushing to history. Strict backends were rejecting follow-up requests because `messages[*].content` was null.
 
 ## What's New in v2.1
 
