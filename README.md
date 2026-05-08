@@ -344,6 +344,29 @@ result = await client.models.list(search="claude")
 
 `models.list()` returns a `ModelListResult` with `.models` (list of dicts), `.fee_pct` (int | None — the agent's platform fee percentage, applied to every billed call), and `.request_id` (str | None). Each model dict contains `slug`, `displayName`, `provider`, `inputPricePer1M`, `outputPricePer1M`, `contextWindow`, `lastSyncedAt`, and an optional `feePct` (platform fee percentage).
 
+## Embeddings
+
+```python
+res = await client.embeddings.create(
+    model="openai/text-embedding-3-large",
+    input="How many vectors fit in a haystack?",
+)
+print(len(res.data[0].embedding))  # → e.g. 3072
+print(res.usage.prompt_tokens, res.model)
+
+# Batch input
+batch = await client.embeddings.create(
+    model="openai/text-embedding-3-small",
+    input=["first", "second", "third"],
+)
+for item in batch.data:
+    print(item.index, item.embedding)
+```
+
+`embeddings.create()` accepts `model` (slug), `input` (string or list of strings, max 2048 entries), and the optional `encoding_format`, `dimensions`, and `user` keyword args. Returns an `EmbeddingsResponse` with `.data: list[EmbeddingItem]`, `.model`, and `.usage` (`prompt_tokens`, `total_tokens`). Embeddings have no completion tokens, so billing is input-only.
+
+> **Catalog:** Embedding models do not appear in OpenRouter's public catalog endpoint, so the proxy maintains them by hand. New embedding models can be added through the admin panel — see `model_type='embedding'` rows.
+
 ## Error Handling
 
 All errors are instances of `LLM4AgentsError`:
@@ -388,6 +411,11 @@ client = LLM4AgentsClient(
     timeout=30.0,                                   # optional, seconds, default 30
 )
 ```
+
+## What's New in v2.4
+
+- **`client.embeddings.create(model=..., input=...)`** — OpenAI-compatible embeddings against `POST /v1/embeddings`. Pass a string or a list of up to 2048 strings; receive an `EmbeddingsResponse` with `data: list[EmbeddingItem]`, `model`, and `usage` (prompt_tokens, total_tokens). Embeddings are billed input-only — there are no completion tokens.
+- New types exported from `llm4agents`: `Embeddings`, `EmbeddingItem`, `EmbeddingsResponse`, `EmbeddingsUsage`. The embedding-model catalog is curated by hand on the server because OpenRouter omits embedding models from its public catalog endpoint; admins maintain the list via the proxy admin panel.
 
 ## What's New in v2.3
 

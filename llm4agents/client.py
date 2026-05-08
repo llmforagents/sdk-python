@@ -9,6 +9,7 @@ from llm4agents.wallets.wallets import Wallets
 from llm4agents.transfer.transfer import Transfer
 from llm4agents.tools.tools import Tools
 from llm4agents.agents import Agents
+from llm4agents.embeddings.embeddings import Embeddings
 
 _DEFAULT_BASE_URL = "https://api.llm4agents.com"
 _DEFAULT_MCP_URL = "https://mcp.llm4agents.com/mcp"
@@ -65,3 +66,4 @@ class LLM4AgentsClient:
         self.tools = Tools(mcp)
         self.models = _ModelsNamespace(self._http)
         self.agents = Agents(self._http)
+        self.embeddings = Embeddings(self._http)

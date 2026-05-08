@@ -18,6 +18,12 @@ from llm4agents.tools.types import (
     McpResourceContent,
     McpContent,
 )
+from llm4agents.embeddings import (
+    Embeddings,
+    EmbeddingItem,
+    EmbeddingsResponse,
+    EmbeddingsUsage,
+)
 
 __all__ = [
     "LLM4AgentsClient",
@@ -45,4 +51,8 @@ __all__ = [
     "McpImageContent",
     "McpResourceContent",
     "McpContent",
+    "Embeddings",
+    "EmbeddingItem",
+    "EmbeddingsResponse",
+    "EmbeddingsUsage",
 ]
