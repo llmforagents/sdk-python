@@ -409,10 +409,56 @@ except X402PaymentRequiredError as err:
 > are currently supported. The USDC EIP-712 domain name differs between them
 > (`USD Coin` vs `USDC`); `eth_account_to_signer` handles this automatically.
 
-> **Endpoints:** Only `POST /v1/chat/completions` accepts x402. All other
-> endpoints (`/v1/embeddings`, `/api/v1/wallets/*`, MCP tools, etc.) require Bearer
-> auth — using x402 mode on a non-allowed path raises `LLM4AgentsError`
-> with code `x402_payment_required` and a clear message.
+> **Endpoints accepting x402** (signed per-call USDC):
+> - `POST /v1/chat/completions` — chat with any model (per-token signed upper bound)
+> - `POST /v1/scrape/{markdown,fetch_html,links,screenshot,pdf,extract}` — one-shot scraping
+> - `POST /v1/search/{google,news,maps,batch}` — Google search (Serper)
+> - `POST /v1/image/{generate,edit,analyze}` — image generation / edit / vision
+>
+> Per-call x402 prices are seeded ~10% below x402engine.app reference rates
+> (e.g. scrape markdown ~$0.0045, screenshot ~$0.009, image gen ~$0.0135-$0.045).
+> Prices are admin-editable from the operator panel without redeploy.
+>
+> Browser sessions (`session_*`) and other endpoints (`/v1/embeddings`,
+> `/api/v1/wallets/*`, etc.) stay **Bearer-only** — sessions are
+> pre-deposit by design. Using x402 mode on a non-allowed path raises
+> `LLM4AgentsError` with code `x402_payment_required` and a clear message.
+
+### REST scrape / search / image with x402
+
+The same `payment=PaymentConfig(mode="x402", signer=..., network=...)`
+client config that works for chat completions also works for the MCP
+REST surface:
+
+```python
+import httpx
+from eth_account import Account
+from llm4agents import LLM4AgentsClient, PaymentConfig, eth_account_to_signer
+
+account = Account.from_key("0xYOUR_KEY")
+client = LLM4AgentsClient(
+    api_key="",
+    payment=PaymentConfig(
+        mode="x402",
+        signer=eth_account_to_signer(account),
+        network="base-sepolia",
+    ),
+)
+
+# Probe + sign once, then hit the REST endpoint directly with the X-PAYMENT
+signed = await client.x402.sign()
+async with httpx.AsyncClient() as http:
+    res = await http.post(
+        "https://api.llm4agents.com/v1/scrape/markdown",
+        headers={"x-payment": signed.encoded_header},
+        json={"url": "https://example.com"},
+    )
+    print(res.json())
+```
+
+The MCP tools accessor (`client.tools.scraper.markdown(...)`) currently
+uses Bearer auth via the MCP transport; the REST surface above is the
+path for walk-up.
 
 ## MCP Tools
 
@@ -579,6 +625,11 @@ client = LLM4AgentsClient(
   `decode_payment_required_header`, `pick_supported_requirements`, `USDC_ADDRESS_BY_NETWORK`,
   `USDC_DOMAIN_NAME_BY_NETWORK`, `X402_CAIP2_BY_NETWORK`, `CHAIN_ID_BY_NETWORK`,
   `TRANSFER_WITH_AUTHORIZATION_TYPES`, `DEFAULT_VALID_FOR_SECONDS`.
+- **x402 allowlist extended** to the MCP REST surface — clients in x402
+  mode can now hit `/v1/scrape/*`, `/v1/search/*`, and `/v1/image/*` in
+  addition to chat. Prices are admin-editable in cents from the
+  operator panel (parallel `value` for balance / `x402_value` for
+  walk-up per tool).
 
 ## What's New in v2.4
 
