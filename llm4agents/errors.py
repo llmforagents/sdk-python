@@ -18,6 +18,9 @@ ErrorCode = Literal[
     "tool_not_found",
     "tool_execution_error",
     "tool_loop_limit",
+    # x402 walk-up payment required (distinct from insufficient_balance
+    # which is Bearer-mode pre-deposit shortfall).
+    "x402_payment_required",
 ]
 
 _STATUS_TO_CODE: dict[int, str] = {

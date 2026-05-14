@@ -10,6 +10,8 @@ from llm4agents.transfer.transfer import Transfer
 from llm4agents.tools.tools import Tools
 from llm4agents.agents import Agents
 from llm4agents.embeddings.embeddings import Embeddings
+from llm4agents.x402.client import X402Namespace
+from llm4agents.x402.types import PaymentConfig
 
 _DEFAULT_BASE_URL = "https://api.llm4agents.com"
 _DEFAULT_MCP_URL = "https://mcp.llm4agents.com/mcp"
@@ -55,8 +57,16 @@ class LLM4AgentsClient:
         base_url: str = _DEFAULT_BASE_URL,
         mcp_url: str = _DEFAULT_MCP_URL,
         timeout: float = _DEFAULT_TIMEOUT,
+        payment: PaymentConfig | None = None,
     ) -> None:
-        self._http = HttpTransport(base_url, api_key, timeout)
+        resolved_payment = payment or PaymentConfig(mode="bearer")
+        if resolved_payment.mode == "bearer" and not api_key:
+            raise ValueError(
+                "api_key is required in Bearer mode. For x402 walk-up "
+                "payments, pass payment=PaymentConfig(mode='x402', "
+                "signer=...) and an empty api_key is fine."
+            )
+        self._http = HttpTransport(base_url, api_key, timeout, payment=resolved_payment)
         mcp = McpTransport(mcp_url, api_key, _MCP_TIMEOUT)
 
         completions = ChatCompletions(self._http)
@@ -67,3 +77,4 @@ class LLM4AgentsClient:
         self.models = _ModelsNamespace(self._http)
         self.agents = Agents(self._http)
         self.embeddings = Embeddings(self._http)
+        self.x402 = X402Namespace(resolved_payment, base_url, timeout)
