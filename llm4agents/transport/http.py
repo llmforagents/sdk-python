@@ -17,7 +17,26 @@ from llm4agents.x402.types import (
 )
 
 # Routes that the proxy currently accepts x402 payment on.
-_X402_ALLOWED_PATHS: frozenset[str] = frozenset({"/v1/chat/completions"})
+# Routes that accept x402 walk-up payment. Browser sessions
+# (``session_*`` MCP tools) are intentionally excluded — they stay
+# Bearer-only because the launch + per-30s + per-action billing model
+# is incompatible with a single per-call signed authorization.
+_X402_ALLOWED_PATHS: frozenset[str] = frozenset({
+    "/v1/chat/completions",
+    "/v1/scrape/fetch_html",
+    "/v1/scrape/markdown",
+    "/v1/scrape/links",
+    "/v1/scrape/screenshot",
+    "/v1/scrape/pdf",
+    "/v1/scrape/extract",
+    "/v1/search/google",
+    "/v1/search/news",
+    "/v1/search/maps",
+    "/v1/search/batch",
+    "/v1/image/generate",
+    "/v1/image/edit",
+    "/v1/image/analyze",
+})
 
 
 class HttpTransport:

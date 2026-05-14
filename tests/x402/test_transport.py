@@ -180,3 +180,31 @@ async def test_x402_mode_blocks_non_allowed_paths() -> None:
         await http.post("/api/v1/wallets/generate", {})
     with pytest.raises(LLM4AgentsError, match="x402 mode is only available"):
         await http.post("/v1/embeddings", {})
+
+
+@respx.mock
+@pytest.mark.parametrize("path", [
+    "/v1/scrape/markdown",
+    "/v1/scrape/fetch_html",
+    "/v1/search/google",
+    "/v1/image/generate",
+])
+async def test_x402_mode_allows_mcp_rest_paths(path: str) -> None:
+    """Verify the allowlist accepts every REST surface from the proxy
+    P3 wire-up: /v1/scrape/*, /v1/search/*, /v1/image/*. Each probes,
+    receives 402 + paymentRequirements, signs, retries, gets 200."""
+    signer = eth_account_to_signer(Account.from_key(TEST_KEY))
+    respx.post(f"https://api.test{path}").mock(
+        side_effect=[
+            httpx.Response(402, json=_requirements_body()),
+            httpx.Response(200, json={"ok": True}),
+        ]
+    )
+    http = HttpTransport(
+        "https://api.test",
+        "",
+        5.0,
+        payment=PaymentConfig(mode="x402", signer=signer, network="base-sepolia"),
+    )
+    result = await http.post(path, {})
+    assert result == {"ok": True}
