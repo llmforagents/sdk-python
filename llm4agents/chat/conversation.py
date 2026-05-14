@@ -241,7 +241,14 @@ class Conversation:
           {"type": "tool_result", "name": str, "result": McpToolResult}
           {"type": "meta", "meta": ResponseMeta}
           {"type": "fallback", "reason": "tools_ignored", "model": str}
+          {"type": "x402_receipt", "transaction": str, "network": str, "amount": str, "payer": str}
           {"type": "done", "response": {"content": str, "tool_calls": list, "usage": dict}}
+
+        ``x402_receipt`` only fires when the client is constructed in
+        x402 walk-up mode (``payment=PaymentConfig(mode='x402', ...)``).
+        The proxy emits a trailing ``event: x402-receipt`` SSE chunk
+        after settlement; we always yield it BEFORE the matching ``done``
+        event so consumers can correlate the receipt with the round.
         """
         self._history.append(
             {"role": "user", "content": message, "tool_calls": None, "tool_call_id": None}
@@ -276,8 +283,30 @@ class Conversation:
             streamed_content = ""
             pending_tool_calls: dict[int, dict[str, str]] = {}
             chunk_usage: dict[str, int] | None = None
+            # Captured from the transport when the proxy emits a trailing
+            # `event: x402-receipt` SSE chunk. Yielded as
+            # `{"type": "x402_receipt", ...}` BEFORE each `done` site so
+            # consumers can correlate the receipt with the chat round.
+            received_receipt: dict[str, str] | None = None
 
             async for chunk in sse_stream:
+                event_name = chunk.get("_event") if isinstance(chunk, dict) else None
+                if event_name == "x402-receipt":
+                    data = chunk.get("data") or {}
+                    if all(
+                        isinstance(data.get(k), str)
+                        for k in ("transaction", "network", "amount", "payer")
+                    ):
+                        received_receipt = {
+                            "transaction": data["transaction"],
+                            "network": data["network"],
+                            "amount": data["amount"],
+                            "payer": data["payer"],
+                        }
+                    continue
+                if event_name is not None:
+                    # Unknown typed SSE event — forward-compatible skip.
+                    continue
                 choices = chunk.get("choices") or []
                 first_choice = choices[0] if choices else None
                 delta = first_choice.get("delta") if first_choice else None
@@ -380,6 +409,8 @@ class Conversation:
 
                     if not fb["tool_calls"]:
                         yield {"type": "text", "content": fb["text_without_blocks"]}
+                        if received_receipt is not None:
+                            yield {"type": "x402_receipt", **received_receipt}
                         yield {
                             "type": "done",
                             "response": {
@@ -406,6 +437,8 @@ class Conversation:
                         if self._on_tool_call is not None:
                             should_continue = self._on_tool_call(name, args)
                             if not should_continue:
+                                if received_receipt is not None:
+                                    yield {"type": "x402_receipt", **received_receipt}
                                 yield {
                                     "type": "done",
                                     "response": {
@@ -441,6 +474,8 @@ class Conversation:
                     full_content = ""
                     continue
 
+                if received_receipt is not None:
+                    yield {"type": "x402_receipt", **received_receipt}
                 yield {
                     "type": "done",
                     "response": {
@@ -469,6 +504,8 @@ class Conversation:
                 if self._on_tool_call is not None:
                     should_continue = self._on_tool_call(name, args)
                     if not should_continue:
+                        if received_receipt is not None:
+                            yield {"type": "x402_receipt", **received_receipt}
                         yield {
                             "type": "done",
                             "response": {
@@ -507,6 +544,8 @@ class Conversation:
                 for c in tc_rec["result"].content
             )
             if has_image:
+                if received_receipt is not None:
+                    yield {"type": "x402_receipt", **received_receipt}
                 yield {
                     "type": "done",
                     "response": {
