@@ -267,6 +267,199 @@ result = await client.transfer.submit(quote, "0xPrivateKey...")
 print(result.tx_hash)
 ```
 
+## x402 Walk-up Payment
+
+The proxy supports the [x402 protocol](https://x402.org) for per-request stablecoin
+payments on `POST /v1/chat/completions`. Instead of pre-funding an agent account,
+the client signs an EIP-3009 `TransferWithAuthorization` for USDC on Base /
+Base-Sepolia, attaches it as an `X-PAYMENT` header, and the proxy settles
+on-chain after the response is delivered.
+
+Two modes are mutually exclusive — pick one at construction time:
+
+| Mode | Set via | Required | Use when |
+|---|---|---|---|
+| **Bearer** (default) | omit `payment` or `PaymentConfig(mode="bearer")` | `api_key` | You have an agent and a pre-funded balance |
+| **x402 walk-up** | `payment=PaymentConfig(mode="x402", signer=...)` | `signer` (eth_account or custom) | You want one-shot calls billed per-request from a wallet, no agent registration |
+
+### Bearer vs x402 — at a glance
+
+```python
+from llm4agents import LLM4AgentsClient, PaymentConfig, eth_account_to_signer
+from eth_account import Account
+
+# Bearer (existing) — pre-funded agent
+bearer = LLM4AgentsClient(api_key="sk-proxy-...")
+
+# x402 walk-up — pay per call from a wallet
+account = Account.from_key("0xYOUR_PRIVATE_KEY")
+x402 = LLM4AgentsClient(
+    api_key="",  # ignored in x402 mode
+    payment=PaymentConfig(
+        mode="x402",
+        signer=eth_account_to_signer(account),
+        network="base-sepolia",        # or "base" for mainnet
+    ),
+)
+
+# Same API surface — the SDK probes the proxy for a 402, signs an
+# EIP-3009 authorization, and retries with X-PAYMENT automatically.
+res = await x402.chat.completions.create({
+    "model": "openai/gpt-4o-mini",
+    "messages": [{"role": "user", "content": "Hello"}],
+})
+```
+
+### Custom signers (no eth_account dependency)
+
+`eth_account` is already a hard dependency of the SDK (used by gasless transfers),
+so `eth_account_to_signer` is the default path. If you want to plug in a hardware
+wallet, KMS-backed key, or WalletConnect, implement the `Signer` Protocol
+directly — the SDK depends on the Protocol, not on `eth_account`:
+
+```python
+from llm4agents import Signer
+
+class HsmSigner:
+    address = "0xYourAddress..."
+
+    async def sign_typed_data(self, *, domain, types, primary_type, message):
+        # Defer to your HSM / KMS / hardware wallet. Return a 0x-prefixed
+        # 65-byte signature.
+        return "0x..."
+
+client = LLM4AgentsClient(
+    api_key="",
+    payment=PaymentConfig(mode="x402", signer=HsmSigner(), network="base"),
+)
+```
+
+`sign_typed_data` may be sync or async — the SDK awaits the result if it's
+a coroutine.
+
+### Streaming receipts
+
+x402-mode streaming responses end with a trailing SSE event after `[DONE]`
+containing the on-chain settlement receipt. The `Conversation.stream()` helper
+surfaces this as a typed event yielded BEFORE the matching `done` event:
+
+```python
+conv = x402.chat.conversation({"model": "openai/gpt-4o-mini"})
+async for ev in conv.stream("Tell me a joke"):
+    if ev["type"] == "text":
+        print(ev["content"], end="", flush=True)
+    elif ev["type"] == "x402_receipt":
+        print(f"\nsettled: {ev['transaction']} on {ev['network']}")
+    elif ev["type"] == "done":
+        print(f"\n{ev['response']['usage']}")
+```
+
+For the lower-level `chat.completions.create()` API, pass `on_x402_receipt`:
+
+```python
+def handle_receipt(receipt):
+    print(f"settled {receipt.amount} on {receipt.network}: {receipt.transaction}")
+
+stream = await x402.chat.completions.create(
+    {"model": "openai/gpt-4o-mini", "messages": [...], "stream": True},
+    on_x402_receipt=handle_receipt,
+)
+async for chunk in stream:
+    ...
+```
+
+### Lower-level helpers — `client.x402`
+
+For advanced use cases (signing without sending, inspecting the 402 response
+shape, batch signing), the `client.x402` namespace exposes the building blocks:
+
+```python
+# Probe the proxy and get the typed PaymentRequirements
+requirements = await x402.x402.probe()
+print(requirements.max_amount_required, requirements.network)
+
+# Probe + sign in one call — returns SignedPayment(payment_payload, encoded_header, requirements)
+signed = await x402.x402.sign()
+#   signed.encoded_header     → base64-encoded X-PAYMENT value
+#   signed.payment_payload    → the parsed PaymentPayload (typed)
+#   signed.requirements       → the proxy-advertised requirements the signature is bound to
+
+# Sign against caller-supplied requirements (no HTTP) — useful for testing
+signed2 = await x402.x402.sign_from_requirements(requirements)
+```
+
+### Error handling
+
+When the proxy rejects payment (signature invalid, nonce reused, etc.) the SDK
+raises `X402PaymentRequiredError` carrying the typed requirements so the caller
+can re-sign with a different amount or network:
+
+```python
+from llm4agents import X402PaymentRequiredError
+
+try:
+    await x402.chat.completions.create({...})
+except X402PaymentRequiredError as err:
+    print("Payment rejected. accepted offers:", err.payment_requirements)
+    print("x402 version:", err.x402_version)
+```
+
+> **Networks:** `"base"` (mainnet, USDC `0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913`)
+> and `"base-sepolia"` (testnet, USDC `0x036CbD53842c5426634e7929541eC2318f3dCF7e`)
+> are currently supported. The USDC EIP-712 domain name differs between them
+> (`USD Coin` vs `USDC`); `eth_account_to_signer` handles this automatically.
+
+> **Endpoints accepting x402** (signed per-call USDC):
+> - `POST /v1/chat/completions` — chat with any model (per-token signed upper bound)
+> - `POST /v1/scrape/{markdown,fetch_html,links,screenshot,pdf,extract}` — one-shot scraping
+> - `POST /v1/search/{google,news,maps,batch}` — Google search (Serper)
+> - `POST /v1/image/{generate,edit,analyze}` — image generation / edit / vision
+>
+> Per-call x402 prices are seeded ~10% below x402engine.app reference rates
+> (e.g. scrape markdown ~$0.0045, screenshot ~$0.009, image gen ~$0.0135-$0.045).
+> Prices are admin-editable from the operator panel without redeploy.
+>
+> Browser sessions (`session_*`) and other endpoints (`/v1/embeddings`,
+> `/api/v1/wallets/*`, etc.) stay **Bearer-only** — sessions are
+> pre-deposit by design. Using x402 mode on a non-allowed path raises
+> `LLM4AgentsError` with code `x402_payment_required` and a clear message.
+
+### REST scrape / search / image with x402
+
+The same `payment=PaymentConfig(mode="x402", signer=..., network=...)`
+client config that works for chat completions also works for the MCP
+REST surface:
+
+```python
+import httpx
+from eth_account import Account
+from llm4agents import LLM4AgentsClient, PaymentConfig, eth_account_to_signer
+
+account = Account.from_key("0xYOUR_KEY")
+client = LLM4AgentsClient(
+    api_key="",
+    payment=PaymentConfig(
+        mode="x402",
+        signer=eth_account_to_signer(account),
+        network="base-sepolia",
+    ),
+)
+
+# Probe + sign once, then hit the REST endpoint directly with the X-PAYMENT
+signed = await client.x402.sign()
+async with httpx.AsyncClient() as http:
+    res = await http.post(
+        "https://api.llm4agents.com/v1/scrape/markdown",
+        headers={"x-payment": signed.encoded_header},
+        json={"url": "https://example.com"},
+    )
+    print(res.json())
+```
+
+The MCP tools accessor (`client.tools.scraper.markdown(...)`) currently
+uses Bearer auth via the MCP transport; the REST surface above is the
+path for walk-up.
+
 ## MCP Tools
 
 All tool methods return `McpToolResult`. Access `.text` for the plain-text representation.
@@ -405,12 +598,38 @@ except LLM4AgentsError as err:
 
 ```python
 client = LLM4AgentsClient(
-    api_key="sk-proxy-...",                         # required
+    api_key="sk-proxy-...",                         # required in Bearer mode; "" in x402 mode
     base_url="https://api.llm4agents.com",          # optional
     mcp_url="https://mcp.llm4agents.com/mcp",       # optional
     timeout=30.0,                                   # optional, seconds, default 30
+    payment=PaymentConfig(mode="bearer"),           # optional, default; or PaymentConfig(mode="x402", signer=..., network=...)
 )
 ```
+
+## What's New in v2.5
+
+- **x402 walk-up payment mode** — pay per-request from a wallet on `/v1/chat/completions` without
+  registering an agent. Pass `payment=PaymentConfig(mode="x402", signer=..., network=...)` to the
+  client constructor. Supports both `eth_account.LocalAccount` (via `eth_account_to_signer`) and
+  any custom `Signer` Protocol implementation (HSM, KMS, hardware wallets, WalletConnect) thanks
+  to the Ports & Adapters design — `sign_typed_data` may be sync or async.
+- Streaming responses emit a typed `x402_receipt` event after `[DONE]`, surfacing the on-chain
+  settlement receipt (`transaction`, `network`, `amount`, `payer`) to `conv.stream()` consumers
+  and the `on_x402_receipt` callback on `chat.completions.create()`.
+- New `client.x402` namespace — `probe()`, `sign(recipient=...)`, and
+  `sign_from_requirements(req, recipient=...)` helpers for low-level integrations.
+- New top-level exports: `PaymentConfig`, `PaymentPayload`, `PaymentRequirements`, `Signer`,
+  `SignedPayment`, `X402Namespace`, `X402Network`, `X402PaymentRequiredError`, `X402Receipt`,
+  `eth_account_to_signer`, `build_transfer_with_authorization_typed_data`, `generate_nonce`,
+  `network_to_caip2`, `sign_from_requirements`, `encode_payment_header`,
+  `decode_payment_required_header`, `pick_supported_requirements`, `USDC_ADDRESS_BY_NETWORK`,
+  `USDC_DOMAIN_NAME_BY_NETWORK`, `X402_CAIP2_BY_NETWORK`, `CHAIN_ID_BY_NETWORK`,
+  `TRANSFER_WITH_AUTHORIZATION_TYPES`, `DEFAULT_VALID_FOR_SECONDS`.
+- **x402 allowlist extended** to the MCP REST surface — clients in x402
+  mode can now hit `/v1/scrape/*`, `/v1/search/*`, and `/v1/image/*` in
+  addition to chat. Prices are admin-editable in cents from the
+  operator panel (parallel `value` for balance / `x402_value` for
+  walk-up per tool).
 
 ## What's New in v2.4
 
