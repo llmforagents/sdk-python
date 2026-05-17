@@ -275,6 +275,16 @@ the client signs an EIP-3009 `TransferWithAuthorization` for USDC on Base /
 Base-Sepolia, attaches it as an `X-PAYMENT` header, and the proxy settles
 on-chain after the response is delivered.
 
+> **Scope: this SDK signs x402 payments going OUT.** The SDK builds and signs
+> `X-PAYMENT` headers so your code can pay any x402-compatible server (the
+> llm4agents API, an x402engine endpoint, or any third party). It does **not**
+> include server-side helpers: there is no `verify_payment`, no `settle_payment`,
+> no `require_payment` middleware. If your agent needs to *receive* x402 payments
+> (run its own paywall), use a server library directly — `x402-fastapi` for
+> FastAPI, `x402-flask` for Flask, `coinbase-x402` for any framework, or the
+> [reference servers](https://github.com/x402-foundation/x402#servers) for
+> other stacks. See **Roadmap** below for the server-side direction.
+
 Two modes are mutually exclusive — pick one at construction time:
 
 | Mode | Set via | Required | Use when |
@@ -459,6 +469,27 @@ async with httpx.AsyncClient() as http:
 The MCP tools accessor (`client.tools.scraper.markdown(...)`) currently
 uses Bearer auth via the MCP transport; the REST surface above is the
 path for walk-up.
+
+### Roadmap — server-side x402
+
+Today the SDK is **client-only**: it signs `X-PAYMENT` headers so an agent
+can pay for outbound services. The mirror direction (an agent serving its
+own paywalled endpoint and receiving x402 payments from third parties) is
+**not implemented** and not on the v2.x roadmap.
+
+If you want to monetize your agent with x402, use a server library directly:
+
+| Stack | Library |
+|---|---|
+| FastAPI | [`x402-fastapi`](https://pypi.org/project/x402-fastapi/) |
+| Flask | [`x402-flask`](https://pypi.org/project/x402-flask/) |
+| Any framework (low-level, JWT-auth'd CDP facilitator) | [`coinbase-x402`](https://pypi.org/project/coinbase-x402/) |
+| Other stacks | see the [x402 reference servers](https://github.com/x402-foundation/x402#servers) |
+
+If a first-class `llm4agents-sdk-server` (verify/settle/middleware helpers
+around `coinbase-x402` with llm4agents-flavoured defaults) would help your
+use case, open an issue at
+[`llmforagents/sdk-python`](https://github.com/llmforagents/sdk-python/issues).
 
 ## MCP Tools
 
