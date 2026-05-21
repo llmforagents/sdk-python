@@ -78,3 +78,11 @@ class LLM4AgentsClient:
         self.agents = Agents(self._http)
         self.embeddings = Embeddings(self._http)
         self.x402 = X402Namespace(resolved_payment, base_url, timeout)
+
+    async def close(self) -> None:
+        """Release all resources: MCP server handles + http transport.
+
+        Stdio MCP servers spawn child processes; calling close() prevents
+        process leaks. HTTP MCP transports release their fetch state.
+        """
+        await self.tools.disconnect_all()

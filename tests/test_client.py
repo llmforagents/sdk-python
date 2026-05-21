@@ -36,3 +36,16 @@ def test_error_is_exported():
 def test_custom_base_url():
     client = LLM4AgentsClient(api_key="sk-test", base_url="https://custom.example.com")
     assert client._http._base_url == "https://custom.example.com"
+
+
+@pytest.mark.asyncio
+async def test_close_disconnects_all_mcp_servers():
+    """Test that client.close() calls tools.disconnect_all()."""
+    from unittest.mock import AsyncMock
+
+    client = LLM4AgentsClient(api_key="sk-test")
+    # Replace tools.disconnect_all with a spy
+    spy = AsyncMock(return_value=None)
+    client.tools.disconnect_all = spy  # type: ignore[method-assign]
+    await client.close()
+    spy.assert_called_once()
