@@ -106,13 +106,44 @@ class Tools:
         return handle
 
     async def disconnect(self, name: str) -> None:
+        """Disconnect a registered MCP server by name.
+
+        Raises ``ValueError`` if no server with that name is connected — matches
+        the TS SDK's ``Tools.disconnect()`` behavior for cross-language parity.
+        """
         handle = self._servers.pop(name, None)
-        if handle is not None:
-            await handle.disconnect()
+        if handle is None:
+            raise ValueError(f'No connected MCP server named "{name}".')
+        await handle.disconnect()
 
     async def disconnect_all(self) -> None:
-        for name in list(self._servers.keys()):
-            await self.disconnect(name)
+        """Disconnect all registered MCP servers and clear the registry.
+
+        Best-effort: every handle's ``disconnect()`` is dispatched even if
+        some fail. Errors are collected and re-raised as an aggregate after
+        all disconnects have settled, so a single broken handle can't leak
+        the rest of the registry — each underlying child process / HTTP
+        transport still gets the close signal. The registry is cleared in
+        all cases (including on partial failure).
+        """
+        import asyncio
+
+        handles = list(self._servers.values())
+        self._servers.clear()
+        results = await asyncio.gather(
+            *(h.disconnect() for h in handles), return_exceptions=True
+        )
+        errors = [r for r in results if isinstance(r, BaseException)]
+        if errors:
+            # ExceptionGroup is Python 3.11+; fall back to RuntimeError on 3.10.
+            if hasattr(__builtins__, "ExceptionGroup") or "ExceptionGroup" in dir(__builtins__):
+                raise ExceptionGroup(  # type: ignore[name-defined]  # noqa: F821
+                    f"disconnect_all: {len(errors)} handle(s) failed", errors
+                )
+            joined = "; ".join(str(e) for e in errors)
+            raise RuntimeError(
+                f"disconnect_all: {len(errors)} handle(s) failed: {joined}"
+            ) from errors[0]
 
     def connected_servers(self) -> list[str]:
         return list(self._servers.keys())
