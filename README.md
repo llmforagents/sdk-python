@@ -564,16 +564,16 @@ auth and with x402 walk-up.
 
 | Tool | Purpose |
 |---|---|
-| `workspace_create()` | Idempotent — confirm the workspace exists. |
-| `workspace_list(prefix=None, limit=None)` | List files. Free, rate-limited (60/min). |
-| `workspace_stat(filename)` | Get one file's metadata. Free, rate-limited. |
-| `workspace_delete(filename)` | Delete a file (no storage refund). Free, rate-limited. |
-| `workspace_upload(filename, content_base64, days_to_store, content_type=None)` | Inline upload, ≤10 MB. Billed per-MB + storage days. |
-| `workspace_upload_init(filename, size_bytes, days_to_store, content_type=None)` | Start a large upload. Returns `{upload_id, put_url, expires_at, max_bytes}`. Reserves cost. |
-| `workspace_upload_finalize(upload_id)` | Confirm the PUT and settle billing. Must be called within 15 min of init. |
-| `workspace_download(filename, format='inline'|'url', url_ttl_minutes=None)` | Inline returns base64 (≤10 MB). URL returns a **single-use** proxied download URL valid 1-15 min — billed at issuance, streams through our worker (we never expose direct R2 URLs to keep per-download billing accurate). |
-| `workspace_extend(filename, additional_days)` | Extend storage on an existing file. |
-| `workspace_copy(source_filename, dest_filename, days_to_store)` | Server-side copy. Billed for destination storage only. |
+| `workspace.create()` | Idempotent — confirm the workspace exists. |
+| `workspace.list(prefix=None, limit=None)` | List files. Free, rate-limited (60/min). |
+| `workspace.stat(filename)` | Get one file's metadata. Free, rate-limited. |
+| `workspace.delete(filename)` | Delete a file (no storage refund). Free, rate-limited. |
+| `workspace.upload(filename, content_base64, days_to_store, content_type=None)` | Inline upload, ≤10 MB. Billed per-MB + storage days. |
+| `workspace.upload_init(filename, size_bytes, days_to_store, content_type=None)` | Start a large upload. Returns `{upload_id, put_url, expires_at, max_bytes}`. Reserves cost. |
+| `workspace.upload_finalize(upload_id)` | Confirm the PUT and settle billing. Must be called within 15 min of init. |
+| `workspace.download(filename, format='inline'|'url', url_ttl_minutes=None)` | Inline returns base64 (≤10 MB). URL returns a **single-use** proxied download URL valid 1-15 min — billed at issuance, streams through our worker (we never expose direct R2 URLs to keep per-download billing accurate). |
+| `workspace.extend(filename, additional_days)` | Extend storage on an existing file. |
+| `workspace.copy(source_filename, dest_filename, days_to_store)` | Server-side copy. Billed for destination storage only. |
 
 ### Pricing
 
@@ -593,31 +593,35 @@ x402 walk-up rates are ~10% lower per-MB.
 
 ```python
 import base64
+import json
 import os
 from llm4agents import LLM4AgentsClient
 
 client = LLM4AgentsClient(api_key=os.environ["LLM4AGENTS_API_KEY"])
 
 # Upload a small file
-await client.tools.workspace_upload(
+await client.tools.workspace.upload(
     filename="scrapes/page-1.md",
     content_base64=base64.b64encode(b"# Hello\n").decode("ascii"),
     days_to_store=7,
     content_type="text/markdown",
 )
 
-# List files
-result = await client.tools.workspace_list(prefix="scrapes/")
+# List files — result.text is the JSON-stringified response from the MCP tool
+list_result = await client.tools.workspace.list(prefix="scrapes/")
+data = json.loads(list_result.text)
+files = data["files"]
 
 # Get a one-time proxied URL — useful when forwarding bytes to a third party
 # (email attachment, frontend hand-off, etc.). The URL is single-use: the
 # second hit returns 410. The agent is billed at issuance.
-download = await client.tools.workspace_download(
+dl_result = await client.tools.workspace.download(
     filename="scrapes/page-1.md",
     format="url",
     url_ttl_minutes=5,
 )
-# Hand `download["download_url"]` to whoever needs the bytes — they GET it once.
+download_url = json.loads(dl_result.text)["download_url"]
+# Hand `download_url` to whoever needs the bytes — they GET it once.
 ```
 
 ## Models
