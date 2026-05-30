@@ -72,6 +72,97 @@ class _ImageNamespace:
         return await self._mcp.call_tool("analyze_image", {"prompt": prompt, **kwargs})
 
 
+class _WorkspaceNamespace:
+    def __init__(self, mcp: McpTransport) -> None:
+        self._mcp = mcp
+
+    async def create(self) -> McpToolResult:
+        return await self._mcp.call_tool("workspace_create", {})
+
+    async def list(self, prefix: str | None = None, limit: int | None = None) -> McpToolResult:
+        params: dict[str, Any] = {}
+        if prefix is not None:
+            params["prefix"] = prefix
+        if limit is not None:
+            params["limit"] = limit
+        return await self._mcp.call_tool("workspace_list", params)
+
+    async def stat(self, filename: str) -> McpToolResult:
+        return await self._mcp.call_tool("workspace_stat", {"filename": filename})
+
+    async def delete(self, filename: str) -> McpToolResult:
+        return await self._mcp.call_tool("workspace_delete", {"filename": filename})
+
+    async def upload(
+        self,
+        filename: str,
+        content_base64: str,
+        days_to_store: int,
+        content_type: str | None = None,
+    ) -> McpToolResult:
+        params: dict[str, Any] = {
+            "filename": filename,
+            "content_base64": content_base64,
+            "days_to_store": days_to_store,
+        }
+        if content_type is not None:
+            params["content_type"] = content_type
+        return await self._mcp.call_tool("workspace_upload", params)
+
+    async def upload_init(
+        self,
+        filename: str,
+        size_bytes: int,
+        days_to_store: int,
+        content_type: str | None = None,
+    ) -> McpToolResult:
+        params: dict[str, Any] = {
+            "filename": filename,
+            "size_bytes": size_bytes,
+            "days_to_store": days_to_store,
+        }
+        if content_type is not None:
+            params["content_type"] = content_type
+        return await self._mcp.call_tool("workspace_upload_init", params)
+
+    async def upload_finalize(self, upload_id: str) -> McpToolResult:
+        return await self._mcp.call_tool("workspace_upload_finalize", {"upload_id": upload_id})
+
+    async def download(
+        self,
+        filename: str,
+        format: str | None = None,
+        url_ttl_minutes: int | None = None,
+    ) -> McpToolResult:
+        params: dict[str, Any] = {"filename": filename}
+        if format is not None:
+            params["format"] = format
+        if url_ttl_minutes is not None:
+            params["url_ttl_minutes"] = url_ttl_minutes
+        return await self._mcp.call_tool("workspace_download", params)
+
+    async def extend(self, filename: str, additional_days: int) -> McpToolResult:
+        return await self._mcp.call_tool(
+            "workspace_extend",
+            {"filename": filename, "additional_days": additional_days},
+        )
+
+    async def copy(
+        self,
+        source_filename: str,
+        dest_filename: str,
+        days_to_store: int,
+    ) -> McpToolResult:
+        return await self._mcp.call_tool(
+            "workspace_copy",
+            {
+                "source_filename": source_filename,
+                "dest_filename": dest_filename,
+                "days_to_store": days_to_store,
+            },
+        )
+
+
 class Tools:
     def __init__(self, mcp: McpTransport) -> None:
         self._mcp = mcp
@@ -80,6 +171,7 @@ class Tools:
         self.scraper = _ScraperNamespace(mcp)
         self.search = _SearchNamespace(mcp)
         self.image = _ImageNamespace(mcp)
+        self.workspace = _WorkspaceNamespace(mcp)
 
     @property
     def definitions(self) -> list[ToolDefinition]:
