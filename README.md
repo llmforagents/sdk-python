@@ -713,6 +713,21 @@ client = LLM4AgentsClient(
 
 ## What's New in v2.6
 
+### 2.6.1 — streaming meta cost (bugfix)
+
+- **Fix: `ResponseMeta.cost_usd_cents` was `None` on streaming rounds.** The
+  proxy doesn't emit `x-cost-usd-cents` in response headers for streams — it
+  attaches the final cost to the terminating SSE chunk's `usage.cost` field
+  (USD). The SDK now promotes that into `cost_usd_cents` (cents) so streaming
+  and non-streaming consumers see the same field. Fractional cents are
+  preserved (no truncation), so micro-spend rounds report their real cost.
+- **Type widening: `cost_usd_cents` is now `float | None`** (was `int | None`).
+  Streaming completions can produce fractional cents (e.g. 0.0035 for a haiku
+  round). Integer values from `x-cost-usd-cents` headers still satisfy the
+  new type without code changes.
+
+### 2.6.0
+
 - **`Conversation` accepts `tool_choice`** — Force tool selection on round 1 only;
   reverts to `"auto"` for subsequent rounds so the model can summarize tool results
   naturally without looping. Critical for agent-routing patterns where the model

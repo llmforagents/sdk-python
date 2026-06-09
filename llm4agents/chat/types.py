@@ -15,7 +15,13 @@ class ChatMessage(TypedDict, total=False):
 class ResponseMeta:
     request_id: str | None
     model_used: str | None
-    cost_usd_cents: int | None
+    # `float` rather than `int` because streaming rounds promote the
+    # terminating SSE chunk's `usage.cost` (USD) into this field as cents
+    # (× 100), and micro-spend rounds can be fractional cents (e.g. 0.0035
+    # for a haiku completion). The non-streaming path still receives an
+    # integer here via the `x-cost-usd-cents` header — both shapes satisfy
+    # `float | None` without truncation.
+    cost_usd_cents: float | None
     balance_remaining_cents: int | None
     tokens_input: int | None
     tokens_output: int | None

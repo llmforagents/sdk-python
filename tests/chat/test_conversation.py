@@ -1025,3 +1025,99 @@ async def test_tool_choice_specific_function_shape(http):
         "tool_choice": {"type": "function", "function": {"name": "supervisor__delegate"}},
     })
     assert conv._tool_choice == {"type": "function", "function": {"name": "supervisor__delegate"}}
+
+
+# Streaming meta cost extraction.
+#
+# The proxy's streaming endpoint doesn't carry x-cost-usd-cents in response
+# headers — by the time headers flush, the round's cost isn't known. The
+# cost arrives on the terminating SSE chunk's `usage.cost` field (USD
+# float) instead. Without the promotion, every streaming round reports
+# cost_usd_cents=None and the agent_dashboard shows $0 spent despite
+# proxy debits.
+@respx.mock
+async def test_stream_promotes_chunk_usage_cost_to_meta(http):
+    async def chunked_stream():
+        async def _gen():
+            # First chunk: content
+            yield b'data: {"id":"c1","choices":[{"index":0,"delta":{"role":"assistant","content":"ok"},"finish_reason":null}],"model":"m"}\n\n'
+            # Terminating chunk: usage.cost in USD
+            yield b'data: {"id":"c1","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":5,"cost":0.000035},"model":"m"}\n\n'
+            yield b'data: [DONE]\n\n'
+        return _gen()
+
+    # Manual SSE response — no x-cost-usd-cents header (mirrors prod proxy
+    # streaming behavior).
+    respx.post("https://api.example.com/v1/chat/completions").mock(
+        return_value=httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream", "x-request-id": "r", "x-model-used": "m"},
+            content=(
+                b'data: {"id":"c1","choices":[{"index":0,"delta":{"role":"assistant","content":"ok"},"finish_reason":null}],"model":"m"}\n\n'
+                b'data: {"id":"c1","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":5,"cost":0.000035},"model":"m"}\n\n'
+                b'data: [DONE]\n\n'
+            ),
+        )
+    )
+
+    conv = Conversation(http, {"model": "m"})
+    meta_events = []
+    async for ev in conv.stream("hi"):
+        if ev.get("type") == "meta":
+            meta_events.append(ev["meta"])
+
+    assert len(meta_events) == 1
+    # 0.000035 USD × 100 = 0.0035 cents — fractional, must be preserved.
+    assert meta_events[0].cost_usd_cents == pytest.approx(0.0035, rel=1e-6)
+
+
+@respx.mock
+async def test_stream_header_wins_over_chunk_cost_when_both_present(http):
+    """If x-cost-usd-cents IS set in headers AND usage.cost is in the
+    terminating chunk, the header value wins. The promotion only fires
+    when the header-based path didn't populate cost_usd_cents."""
+    respx.post("https://api.example.com/v1/chat/completions").mock(
+        return_value=httpx.Response(
+            200,
+            headers={
+                "content-type": "text/event-stream",
+                "x-request-id": "r",
+                "x-cost-usd-cents": "7",   # 7 cents from header — should win
+                "x-model-used": "m",
+            },
+            content=(
+                b'data: {"id":"c1","choices":[{"index":0,"delta":{"content":"ok"},"finish_reason":null}],"model":"m"}\n\n'
+                b'data: {"id":"c1","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":5,"cost":0.50},"model":"m"}\n\n'
+                b'data: [DONE]\n\n'
+            ),
+        )
+    )
+    conv = Conversation(http, {"model": "m"})
+    meta_events = []
+    async for ev in conv.stream("hi"):
+        if ev.get("type") == "meta":
+            meta_events.append(ev["meta"])
+    assert meta_events[0].cost_usd_cents == 7
+
+
+@respx.mock
+async def test_stream_cost_remains_none_when_neither_header_nor_chunk_has_it(http):
+    """Defensive: if neither header nor chunk carries cost, cost_usd_cents
+    stays None. Consumers can fall back to token-based math."""
+    respx.post("https://api.example.com/v1/chat/completions").mock(
+        return_value=httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream", "x-request-id": "r", "x-model-used": "m"},
+            content=(
+                b'data: {"id":"c1","choices":[{"index":0,"delta":{"content":"ok"},"finish_reason":null}],"model":"m"}\n\n'
+                b'data: {"id":"c1","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":5},"model":"m"}\n\n'
+                b'data: [DONE]\n\n'
+            ),
+        )
+    )
+    conv = Conversation(http, {"model": "m"})
+    meta_events = []
+    async for ev in conv.stream("hi"):
+        if ev.get("type") == "meta":
+            meta_events.append(ev["meta"])
+    assert meta_events[0].cost_usd_cents is None

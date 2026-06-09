@@ -369,6 +369,18 @@ class Conversation:
                     total_reasoning_tokens += int(r_tok)
 
             round_meta = ResponseMeta.from_headers(headers)
+            # Streaming responses don't carry x-cost-usd-cents in the
+            # response headers — by the time headers flush, the proxy
+            # hasn't finished tallying the round. The terminating SSE
+            # chunk's `usage.cost` field (USD float) carries the final
+            # number instead; promote it into cost_usd_cents (× 100)
+            # so streaming consumers see the same field as non-streaming.
+            # Header-based path is preserved: if cost_usd_cents was
+            # already populated from headers, leave it.
+            chunk_cost = chunk_usage.get("cost") if chunk_usage else None
+            if round_meta.cost_usd_cents is None and isinstance(chunk_cost, (int, float)):
+                from dataclasses import replace as _dc_replace
+                round_meta = _dc_replace(round_meta, cost_usd_cents=chunk_cost * 100)
             yield {"type": "meta", "meta": round_meta}
             if self._on_round_meta is not None:
                 self._on_round_meta(round_meta)
