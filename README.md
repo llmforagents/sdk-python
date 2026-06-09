@@ -142,6 +142,7 @@ conv = client.chat.conversation({
     "on_tools_ignored": lambda model: print(f"WARN: {model} ignored tools"),
     "enable_prompt_tool_fallback": True,   # retry round 0 with tools in prompt
     "max_tool_rounds": 5,         # default 10
+    "tool_choice": "required",    # "auto" (default) | "required" | "none" | {"type": "function", "function": {"name": "..."}}
 })
 
 # Single turn
@@ -176,6 +177,8 @@ branch = conv.fork()        # copy history + all callbacks into a new Conversati
 `on_round_meta` fires after each round with a `ResponseMeta` containing `cost_usd_cents`, `balance_remaining_cents`, `tokens_input`, `tokens_output`, `tokens_reasoning`, `model_used`, and `request_id` parsed from response headers.
 
 `on_tools_ignored(model)` fires once if you pass `tools` but the model returns no tool calls on the first round — useful for detecting models without native function calling.
+
+`tool_choice` controls tool selection on **round 1 only**, then reverts to `"auto"` for every subsequent round. This is the agent-routing pattern: force the model to use a tool on the first turn (so it can't quietly emit JSON-as-text instead), then let it summarize the tool result naturally on the wrap-up turn. Setting `"required"` on every round forces a tool call forever and the conversation hits `max_tool_rounds`. Accepts `"auto"` (default), `"required"`, `"none"`, or `{"type": "function", "function": {"name": "..."}}` to force a specific named tool.
 
 `enable_prompt_tool_fallback=True` adds an automatic recovery path for those models. When round 0 ignores tools, the SDK retries the round once with the tool definitions injected into the system prompt and asks the model to emit `<tool_call>{"name":"...","arguments":{...}}</tool_call>` blocks. Parsed blocks are executed exactly like native tool calls, so the rest of the loop is unchanged. In `stream()` you'll see a `{"type": "fallback", "reason": "tools_ignored", "model": ...}` event before the fallback round runs (the fallback round itself is non-streamed). If the fallback also returns no blocks, its plain-text reply is returned as the answer.
 
@@ -707,6 +710,14 @@ client = LLM4AgentsClient(
     payment=PaymentConfig(mode="bearer"),           # optional, default; or PaymentConfig(mode="x402", signer=..., network=...)
 )
 ```
+
+## What's New in v2.6
+
+- **`Conversation` accepts `tool_choice`** — Force tool selection on round 1 only;
+  reverts to `"auto"` for subsequent rounds so the model can summarize tool results
+  naturally without looping. Critical for agent-routing patterns where the model
+  would otherwise emit JSON-as-text instead of using the tool_calls API. See
+  [Chat](#chat).
 
 ## What's New in v2.5
 

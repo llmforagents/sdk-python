@@ -905,3 +905,123 @@ async def test_stream_synthesizes_id_when_streaming_chunks_omit_it(http):
     tool_msg = next(m for m in conv.messages if m.get("role") == "tool")
     assert tool_msg["tool_call_id"] == tool_calls[0]["id"]
     assert tool_msg["tool_call_id"].startswith("auto_")
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# tool_choice (first-round-only semantics)
+#
+# Mirrors the TS SDK's tests. The agent-builder runtime forces
+# tool_choice='required' for supervisor agents to prevent Anthropic models
+# from emitting tool calls as JSON-in-content (observed live with Sonnet 4.5
+# and Haiku 4.5). On round 2 the field must be dropped so the model can
+# summarize the tool result naturally without being forced into another
+# tool call (Anthropic 400s if `required` is set and there's no remaining
+# tool work).
+@respx.mock
+async def test_tool_choice_forwarded_on_round_1_say(http):
+    captured_bodies = []
+
+    def capture(request):
+        import json as _json
+        captured_bodies.append(_json.loads(request.content))
+        return httpx.Response(200, json={
+            "id": "r1",
+            "choices": [{"index": 0, "message": {"role": "assistant", "content": "ok", "tool_calls": None, "tool_call_id": None}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 5, "completion_tokens": 1},
+            "model": "m",
+        })
+
+    respx.post("https://api.example.com/v1/chat/completions").mock(side_effect=capture)
+
+    conv = Conversation(http, {"model": "m", "tool_choice": "required"})
+    await conv.say("hi")
+    assert captured_bodies[0]["tool_choice"] == "required"
+
+
+@respx.mock
+async def test_tool_choice_dropped_on_round_2_say(http):
+    captured_bodies = []
+
+    mock_tools = MagicMock()
+    mock_tools.definitions = [{"name": "google_search", "description": "x", "inputSchema": {}}]
+    mock_tools.call = AsyncMock(return_value=McpToolResult(
+        content=(McpTextContent(type="text", text="result"),),
+        text="result",
+    ))
+
+    call_count = 0
+
+    def side_effect(request):
+        nonlocal call_count
+        import json as _json
+        captured_bodies.append(_json.loads(request.content))
+        call_count += 1
+        if call_count == 1:
+            return httpx.Response(200, json={
+                "id": "r1",
+                "choices": [{
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": [{"id": "tc-1", "type": "function", "function": {"name": "google_search", "arguments": '{"q":"x"}'}}],
+                        "tool_call_id": None,
+                    },
+                    "finish_reason": "tool_calls",
+                }],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 5},
+                "model": "m",
+            })
+        return httpx.Response(200, json={
+            "id": "r2",
+            "choices": [{"index": 0, "message": {"role": "assistant", "content": "final", "tool_calls": None, "tool_call_id": None}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 15, "completion_tokens": 2},
+            "model": "m",
+        })
+
+    respx.post("https://api.example.com/v1/chat/completions").mock(side_effect=side_effect)
+
+    conv = Conversation(http, {"model": "m", "tools": mock_tools, "tool_choice": "required"})
+    await conv.say("go")
+    assert len(captured_bodies) == 2
+    assert captured_bodies[0]["tool_choice"] == "required"
+    # Critical: without the auto-revert, Anthropic 400s the second round.
+    assert "tool_choice" not in captured_bodies[1]
+
+
+@respx.mock
+async def test_tool_choice_omitted_when_not_set(http):
+    captured = []
+
+    def capture(request):
+        import json as _json
+        captured.append(_json.loads(request.content))
+        return httpx.Response(200, json={
+            "id": "r1",
+            "choices": [{"index": 0, "message": {"role": "assistant", "content": "ok", "tool_calls": None, "tool_call_id": None}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 5, "completion_tokens": 1},
+            "model": "m",
+        })
+
+    respx.post("https://api.example.com/v1/chat/completions").mock(side_effect=capture)
+
+    conv = Conversation(http, {"model": "m"})
+    await conv.say("hi")
+    assert "tool_choice" not in captured[0]
+
+
+async def test_tool_choice_propagated_by_fork(http):
+    conv = Conversation(http, {"model": "m", "tool_choice": "required"})
+    child = conv.fork()
+    # Inspect via the private field — fork is itself the contract under test.
+    assert child._tool_choice == "required"
+
+
+async def test_tool_choice_specific_function_shape(http):
+    """Accepts the {type: 'function', function: {name}} variant used to force
+    a specific named tool (per OpenAI / Anthropic API contracts)."""
+    conv = Conversation(http, {
+        "model": "m",
+        "tool_choice": {"type": "function", "function": {"name": "supervisor__delegate"}},
+    })
+    assert conv._tool_choice == {"type": "function", "function": {"name": "supervisor__delegate"}}

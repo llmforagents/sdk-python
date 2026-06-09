@@ -52,6 +52,15 @@ class Conversation:
             opts.get("enable_prompt_tool_fallback", False)
         )
         self._max_tool_rounds: int = opts.get("max_tool_rounds", 10)
+        # First-round-only tool selection. Mirrors the TS SDK semantics: the
+        # caller's `tool_choice` is forwarded to the LLM on round 1, then the
+        # field is dropped on every subsequent round so the model can wrap up
+        # with plain text once its forced tool has returned. Without this
+        # auto-revert, `'required'` on every round forces the model to keep
+        # tool-calling forever and the conversation hits `max_tool_rounds`;
+        # Anthropic also 400s when `tool_choice='required'` is paired with a
+        # turn that has no remaining tool work. See README for the rationale.
+        self._tool_choice: Any = opts.get("tool_choice")
         self._history: list[ChatMessage] = list(opts.get("history", []))
         self._tool_rounds: int = 0
 
@@ -82,6 +91,8 @@ class Conversation:
             opts["on_round_meta"] = self._on_round_meta
         if self._on_tools_ignored is not None:
             opts["on_tools_ignored"] = self._on_tools_ignored
+        if self._tool_choice is not None:
+            opts["tool_choice"] = self._tool_choice
         return Conversation(self._http, opts)
 
     def _check_tool_limit(self) -> None:
@@ -117,6 +128,9 @@ class Conversation:
             }
             if tool_defs:
                 params["tools"] = tool_defs
+            # First-round-only tool_choice — see __init__ for the rationale.
+            if round_count == 0 and self._tool_choice is not None:
+                params["tool_choice"] = self._tool_choice
 
             data, headers = await self._http.post_with_meta("/v1/chat/completions", params)
 
@@ -275,6 +289,9 @@ class Conversation:
             }
             if tool_defs:
                 params["tools"] = tool_defs
+            # First-round-only tool_choice — see __init__ for the rationale.
+            if round_count == 0 and self._tool_choice is not None:
+                params["tool_choice"] = self._tool_choice
 
             headers, sse_stream = await self._http.post_stream_with_meta(
                 "/v1/chat/completions", params
