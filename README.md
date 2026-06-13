@@ -556,6 +556,149 @@ defs = await client.tools.fetch_definitions()  # list[ToolDefinition] in OpenAI 
 
 Pass these to any LLM that supports function calling, or let `conversation()` manage them automatically when `"tools": client.tools` is set.
 
+### More tools via `client.tools.call(...)`
+
+Beyond the typed `scraper.*`, `search.*`, `image.*`, and `workspace.*` namespaces,
+~30 additional MCP tools are callable **today** through the generic
+`client.tools.call(name, args)` method. Pass the tool name and a dict of
+snake_case arguments; you get back an `McpToolResult` (`.text` for plain text,
+`.raw` for the structured payload). Typed namespaces for these may land in a
+later release — the generic call works now.
+
+```python
+result = await client.tools.call("ai_summarize", {"text": long_article, "max_words": 80})
+print(result.text)        # plain-text summary
+print(result.raw)         # structured tool payload
+```
+
+Prices below are in US cents (¢). `x402` is the per-call walk-up price; tools
+marked **balance-only** are not payable via x402 (Bearer / pre-funded balance
+only).
+
+#### AI (Workers AI)
+
+| Tool | Params | Price (balance / x402) |
+|---|---|---|
+| `ai_summarize` | `text`, `max_words?` | 0.5¢ / 0.45¢ |
+| `ai_translate` | `text`, `target_lang`, `source_lang?` | 0.5¢ / 0.45¢ |
+| `ai_embed` | `input` (str or str[] ≤100) → 768-dim | 0.1¢ / 0.09¢ |
+| `ai_classify` | `text`, `labels` (2-20) | 1¢ / 0.9¢ |
+| `ai_moderate` | `text` | 1¢ / 0.9¢ |
+| `ai_rerank` | `query`, `documents` (≤100), `top_k?` | 1¢ / 0.9¢ |
+| `image_to_text` | `image_base64` | 2¢ / 1.8¢ |
+| `speech_to_text` | `audio_base64` | 1.5¢/MB / 1.35¢/MB (metered per MB) |
+
+```python
+res = await client.tools.call("ai_translate", {"text": "Hello", "target_lang": "es"})
+labels = await client.tools.call("ai_classify", {"text": "I love this!", "labels": ["positive", "negative"]})
+```
+
+#### Notify
+
+| Tool | Params | Price (balance / x402) |
+|---|---|---|
+| `send_telegram` | `bot_token`, `chat_id`, `text`, `parse_mode?` | 1¢ / 0.9¢ |
+| `send_discord` | `webhook_url`, `content` | 1¢ / 0.9¢ |
+| `send_slack` | `webhook_url`, `text` | 1¢ / 0.9¢ |
+| `webhook_post` | `url`, `body`, `headers?` | 1¢ / 0.9¢ |
+| `send_email` | `to`, `subject`, `html?` or `text?`, `from?` | 2¢ / 1.8¢ |
+| `send_sms` | `to` (E.164), `body` | 3¢ / 2.7¢ |
+
+```python
+await client.tools.call("send_slack", {"webhook_url": "https://hooks.slack.com/...", "text": "Scrape done"})
+await client.tools.call("send_email", {"to": "ops@example.com", "subject": "Report", "text": "All green"})
+```
+
+#### Data
+
+| Tool | Params | Price (balance / x402) |
+|---|---|---|
+| `dns_lookup` | `name`, `type?` | free |
+| `ip_geolocate` | `ip` | free |
+| `url_unfurl` | `url` | 1¢ / 0.9¢ |
+| `rss_parse` | `url`, `limit?` | 1¢ / 0.9¢ |
+| `youtube_transcript` | `video`, `lang?` | 1¢ / 0.9¢ |
+| `whois` | `domain` | 1¢ / 0.9¢ |
+| `crypto_price` | `ids` (≤50), `vs_currencies?` | 1¢ / 0.9¢ |
+| `fx_convert` | `amount`, `from`, `to` | 1¢ / 0.9¢ |
+| `qr_generate` | `data`, `size?`, `ecc?` | 1¢ / 0.9¢ |
+| `captcha_solve_create` | `type`, `website_url`, `website_key`, … | 2¢ / 1.8¢ |
+| `captcha_solve_result` | `task_id` | free |
+
+```python
+prices = await client.tools.call("crypto_price", {"ids": ["bitcoin", "ethereum"], "vs_currencies": ["usd"]})
+geo = await client.tools.call("ip_geolocate", {"ip": "8.8.8.8"})
+```
+
+#### Vector
+
+| Tool | Params | Price (balance / x402) |
+|---|---|---|
+| `vector_upsert` | `items` (≤100, each `{id, text? or vector?, metadata?}`) | 0.5¢ per 100 items / 0.45¢ |
+| `vector_query` | `query` (str or float[768]), `top_k?`, `filter?` | 1¢ / 0.9¢ |
+| `vector_delete` | `ids` (≤100) | free |
+
+```python
+await client.tools.call("vector_upsert", {"items": [{"id": "doc1", "text": "hello world", "metadata": {"src": "blog"}}]})
+hits = await client.tools.call("vector_query", {"query": "greetings", "top_k": 5})
+```
+
+#### Web Crawl
+
+| Tool | Params | Price |
+|---|---|---|
+| `web_crawl` | `start_url`, `max_pages?`, `max_depth?`, `allow_subdomains?`, `render?`, `include?`, `exclude?`, `output?` (`'markdown'` or `'links'`), `save_to_workspace?` | 0.5¢/page (min 2¢) — **balance-only** |
+
+```python
+crawl = await client.tools.call("web_crawl", {
+    "start_url": "https://example.com",
+    "max_pages": 20,
+    "output": "markdown",
+    "save_to_workspace": True,
+})
+```
+
+#### Memory
+
+| Tool | Params | Price (balance / x402) |
+|---|---|---|
+| `memory_set` | `key`, `value` (JSON ≤64KB), `ttl_days?` | 1¢ / 0.9¢ |
+| `memory_get` | `key` | free |
+| `memory_list` | `prefix?`, `limit?`, `cursor?` | free |
+| `memory_delete` | `key` | free |
+
+```python
+await client.tools.call("memory_set", {"key": "run:42:status", "value": {"done": True}, "ttl_days": 7})
+state = await client.tools.call("memory_get", {"key": "run:42:status"})
+```
+
+#### Web3 (chains: `ethereum`, `polygon`, `base`, `solana`)
+
+| Tool | Params | Price (balance / x402) |
+|---|---|---|
+| `token_balance` | `chain`, `address`, `token?` | 1¢ / 0.9¢ |
+| `tx_status` | `chain`, `tx_hash` | 1¢ / 0.9¢ |
+| `nft_metadata` | `chain`, `contract`, `token_id` | 1¢ / 0.9¢ |
+| `ens_resolve` | `query`, `direction` (`'forward'` or `'reverse'`) | 1¢ / 0.9¢ |
+
+```python
+bal = await client.tools.call("token_balance", {"chain": "base", "address": "0xabc...", "token": "USDC"})
+name = await client.tools.call("ens_resolve", {"query": "vitalik.eth", "direction": "forward"})
+```
+
+#### Document
+
+| Tool | Params | Price |
+|---|---|---|
+| `pdf_parse` | `workspace_file?` or `url?`, `pages?` | 0.5¢/page (min 1¢) — **balance-only** |
+| `doc_extract` | `workspace_file`, `format` (`'docx'`, `'xlsx'`, or `'csv'`) | 0.5¢/unit (min 1¢) — **balance-only** |
+| `article_extract` | `url` | 1¢ / 0.9¢ |
+
+```python
+parsed = await client.tools.call("pdf_parse", {"workspace_file": "docs/report.pdf", "pages": "1-5"})
+article = await client.tools.call("article_extract", {"url": "https://example.com/post"})
+```
+
 ## Workspace tools
 
 Every authenticated agent gets a private workspace backed by Cloudflare R2.
@@ -710,6 +853,23 @@ client = LLM4AgentsClient(
     payment=PaymentConfig(mode="bearer"),           # optional, default; or PaymentConfig(mode="x402", signer=..., network=...)
 )
 ```
+
+## What's New
+
+- **~30 new MCP tools available via `client.tools.call(...)`** — No SDK upgrade
+  required: these tools are live on the server and callable today through the
+  generic `client.tools.call(name, args)` method (returns `McpToolResult` —
+  `.text` plain text, `.raw` structured). Eight categories: **ai** (Workers AI
+  summarize / translate / embed / classify / moderate / rerank / image-to-text /
+  speech-to-text), **notify** (Telegram / Discord / Slack / webhook / email /
+  SMS), **data** (DNS / IP geolocation / unfurl / RSS / YouTube transcript /
+  WHOIS / crypto price / FX / QR / captcha), **vector** (upsert / query /
+  delete), **web_crawl**, **memory** (set / get / list / delete), **web3**
+  (token balance / tx status / NFT metadata / ENS), and **document** (PDF parse /
+  doc extract / article extract). Most accept x402 walk-up; `web_crawl`,
+  `pdf_parse`, and `doc_extract` are balance-only. Typed namespaces
+  (`client.tools.ai.*`, etc.) may follow in a later release; the generic
+  `call()` works now. See [More tools via `client.tools.call(...)`](#more-tools-via-clienttoolscall).
 
 ## What's New in v2.6
 
