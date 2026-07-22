@@ -37,3 +37,60 @@ async def test_post_401_raises(transport):
         await transport.post("/v1/chat/completions", {})
     assert exc_info.value.code == "auth_error"
     assert exc_info.value.status_code == 401
+
+
+@respx.mock
+async def test_post_binary_success(transport):
+    audio_bytes = b"\xff\xfb\x90\x00fake-mp3-bytes"
+    respx.post("https://api.example.com/v1/audio/speech").mock(
+        return_value=httpx.Response(
+            200,
+            content=audio_bytes,
+            headers={
+                "content-type": "audio/mpeg",
+                "x-request-id": "req-abc",
+                "x-charged-usd-cents": "1",
+                "x-model-used": "x-ai/grok-voice-tts-1.0",
+            },
+        )
+    )
+    data, headers = await transport.post_binary(
+        "/v1/audio/speech",
+        {"model": "x-ai/grok-voice-tts-1.0", "input": "hi", "voice": "sal"},
+    )
+    assert data == audio_bytes
+    assert headers.get("content-type") == "audio/mpeg"
+    assert headers.get("x-request-id") == "req-abc"
+    assert headers.get("x-charged-usd-cents") == "1"
+    assert headers.get("x-model-used") == "x-ai/grok-voice-tts-1.0"
+
+
+@respx.mock
+async def test_post_binary_402_raises_insufficient_balance(transport):
+    respx.post("https://api.example.com/v1/audio/speech").mock(
+        return_value=httpx.Response(
+            402, json={"error": {"code": "insufficient_balance", "message": "Not enough balance"}}
+        )
+    )
+    with pytest.raises(LLM4AgentsError) as exc_info:
+        await transport.post_binary(
+            "/v1/audio/speech",
+            {"model": "x-ai/grok-voice-tts-1.0", "input": "hi", "voice": "sal"},
+        )
+    assert exc_info.value.code == "insufficient_balance"
+    assert exc_info.value.status_code == 402
+
+
+@respx.mock
+async def test_post_binary_400_raises_api_error(transport):
+    respx.post("https://api.example.com/v1/audio/speech").mock(
+        return_value=httpx.Response(
+            400, json={"error": {"code": "validation_error", "message": "input too long"}}
+        )
+    )
+    with pytest.raises(LLM4AgentsError) as exc_info:
+        await transport.post_binary(
+            "/v1/audio/speech",
+            {"model": "x-ai/grok-voice-tts-1.0", "input": "x" * 15001, "voice": "sal"},
+        )
+    assert exc_info.value.status_code == 400

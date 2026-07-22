@@ -808,6 +808,28 @@ for item in batch.data:
 
 > **Catalog:** Embedding models do not appear in OpenRouter's public catalog endpoint, so the proxy maintains them by hand. New embedding models can be added through the admin panel — see `model_type='embedding'` rows.
 
+## Audio (TTS)
+
+```python
+result = await client.audio.speech.create(
+    model="x-ai/grok-voice-tts-1.0",
+    input="Estás en el interior de una pirámide.",
+    voice="sal",             # eve | ara | rex | sal | leo
+    response_format="mp3",
+)
+open("speech.mp3", "wb").write(result.data)
+```
+
+`audio.speech.create()` posts to `POST /v1/audio/speech` and returns a `SpeechResult`: `.data` (`bytes` — the raw audio bytes), `.content_type` (from the response's `content-type` header, defaults to `audio/mpeg`), and optional `.request_id`, `.charged_usd_cents`, `.model_used` surfaced from the `x-request-id`, `x-charged-usd-cents`, and `x-model-used` response headers. `input` is capped at 15,000 characters server-side; a 402 raises the usual `insufficient_balance` `LLM4AgentsError`. Unlike other endpoints, `/v1/audio/speech` is **Bearer-only** — it is not on the x402 walk-up allowlist, so an x402-mode client raises immediately with a clear error rather than attempting the request.
+
+MCP tool equivalent, useful inside `client.tools.call()` dispatch or a tool-calling conversation loop:
+
+```python
+result = await client.tools.text_to_speech("Hola, ¿cómo estás?", voice="eve", format="mp3")
+```
+
+`tools.text_to_speech()` delegates to the `text_to_speech` MCP tool (metered per 1k input characters). Audio payloads over 256KB are not inlined in the tool result — they land in your workspace storage instead; check `result.text` / `result.raw` for the workspace reference.
+
 ## Error Handling
 
 All errors are instances of `LLM4AgentsError`:
@@ -853,6 +875,20 @@ client = LLM4AgentsClient(
     payment=PaymentConfig(mode="bearer"),           # optional, default; or PaymentConfig(mode="x402", signer=..., network=...)
 )
 ```
+
+## What's New in v2.8
+
+- **Text-to-speech** — `client.audio.speech.create(model=..., input=..., voice=..., response_format=None, speed=None)`
+  posts to the new `POST /v1/audio/speech` endpoint and returns a `SpeechResult` (`.data: bytes`,
+  `.content_type`, `.request_id`, `.charged_usd_cents`, `.model_used`). This endpoint is
+  Bearer-only (not on the x402 walk-up allowlist). An MCP-tool equivalent is also available as
+  `client.tools.text_to_speech(text, voice=None, model=None, format=None)` for tool-calling
+  conversation loops. See [Audio (TTS)](#audio-tts).
+- New types exported: `Audio`, `Speech`, `SpeechResult`.
+- The REST API's `GET /api/v1/transactions` endpoint now accepts an optional `?service=` query
+  filter (alongside the existing `?type=`) to narrow results to a specific billed service (e.g.
+  `chat`, `embeddings`, `audio`, `scraper`). Typed SDK support for this filter will land in a
+  follow-up release — for now, pass it via a raw HTTP call against the REST endpoint if needed.
 
 ## What's New
 

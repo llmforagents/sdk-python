@@ -260,3 +260,6 @@ class Tools:
 
     async def call(self, name: str, args: dict[str, Any]) -> McpToolResult:
         return await self._mcp.call_tool(name, args)
+
+    async def text_to_speech(self, text: str, **kwargs: Any) -> McpToolResult:
+        return await self._mcp.call_tool("text_to_speech", {"text": text, **kwargs})

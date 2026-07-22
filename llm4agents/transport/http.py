@@ -267,6 +267,33 @@ class HttpTransport:
                 raise map_http_error(res.status_code, err_body, self._request_id(res))
             return res.json(), res.headers
 
+    async def post_binary(
+        self, path: str, body: dict[str, Any]
+    ) -> tuple[bytes, httpx.Headers]:
+        """Same as post_with_meta() but for endpoints that return raw binary
+        bytes (e.g. audio) instead of JSON. Returns (raw_bytes, response_headers)."""
+        auth_headers = await self._build_post_headers(path, body)
+        async with self._client(with_auth=False) as client:
+            try:
+                res = await client.post(
+                    path, content=json.dumps(body), headers=auth_headers
+                )
+            except httpx.TimeoutException as e:
+                raise LLM4AgentsError(str(e), "timeout", None, None) from e
+            except httpx.NetworkError as e:
+                raise LLM4AgentsError(str(e), "network_error", None, None) from e
+
+            if res.status_code >= 400:
+                body_text = res.text or ""
+                if res.status_code == 402:
+                    self._maybe_throw_x402(res, body_text)
+                try:
+                    err_body = res.json()
+                except ValueError:
+                    err_body = {}
+                raise map_http_error(res.status_code, err_body, self._request_id(res))
+            return res.content, res.headers
+
     async def post_stream(self, path: str, body: dict[str, Any]) -> AsyncIterator[Any]:
         return self._stream(path, body)
 

@@ -24,6 +24,11 @@ from llm4agents.embeddings import (
     EmbeddingsResponse,
     EmbeddingsUsage,
 )
+from llm4agents.audio import (
+    Audio,
+    Speech,
+    SpeechResult,
+)
 from llm4agents.x402 import (
     CHAIN_ID_BY_NETWORK,
     DEFAULT_VALID_FOR_SECONDS,
@@ -80,6 +85,9 @@ __all__ = [
     "EmbeddingItem",
     "EmbeddingsResponse",
     "EmbeddingsUsage",
+    "Audio",
+    "Speech",
+    "SpeechResult",
     # x402 walk-up payment
     "PaymentConfig",
     "PaymentPayload",

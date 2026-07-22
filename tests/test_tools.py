@@ -143,3 +143,21 @@ async def test_image_analyze(tools):
     respx.post("https://mcp.example.com/mcp").mock(return_value=_mcp_text_response("The image shows..."))
     result = await tools.image.analyze("What is this?")
     assert "image" in result.text
+
+
+@respx.mock
+async def test_text_to_speech_delegates_to_mcp_tool(tools):
+    route = respx.post("https://mcp.example.com/mcp").mock(
+        return_value=_mcp_text_response("workspace://audio/speech-123.mp3")
+    )
+    result = await tools.text_to_speech("Hola, ¿cómo estás?", voice="eve", format="mp3")
+    assert "speech-123.mp3" in result.text
+
+    import json as _json
+    sent_body = _json.loads(route.calls.last.request.content)
+    assert sent_body["params"]["name"] == "text_to_speech"
+    assert sent_body["params"]["arguments"] == {
+        "text": "Hola, ¿cómo estás?",
+        "voice": "eve",
+        "format": "mp3",
+    }
