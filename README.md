@@ -886,9 +886,10 @@ client = LLM4AgentsClient(
   conversation loops. See [Audio (TTS)](#audio-tts).
 - New types exported: `Audio`, `Speech`, `SpeechResult`.
 - The REST API's `GET /api/v1/transactions` endpoint now accepts an optional `?service=` query
-  filter (alongside the existing `?type=`) to narrow results to a specific billed service (e.g.
-  `chat`, `embeddings`, `audio`, `scraper`). Typed SDK support for this filter will land in a
-  follow-up release — for now, pass it via a raw HTTP call against the REST endpoint if needed.
+  filter (alongside the existing `?type=`) to narrow results to a specific billed service:
+  `llm` (chat completions + embeddings, default), `tts` (audio speech), `tools` (MCP registry
+  tools), `scraper`, `search`, `image`, `workspace`. Typed SDK support for this filter will land
+  in a follow-up release — for now, pass it via a raw HTTP call against the REST endpoint if needed.
 
 ## What's New
 
