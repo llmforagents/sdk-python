@@ -839,7 +839,8 @@ import asyncio
 
 job = await client.videos.create(
     prompt="A cat riding a skateboard through a neon city",
-    model="kling-2.5",
+    image="https://example.com/first-frame.png",  # x-ai/grok-imagine-video-1.5 is image-to-video
+    model="x-ai/grok-imagine-video-1.5",
     duration=5,
     resolution="720p",
     aspect_ratio="16:9",
@@ -868,7 +869,7 @@ MCP tool equivalents, useful inside `client.tools.call()` dispatch or a tool-cal
 started = await client.tools.generate_video(
     "A cat riding a skateboard through a neon city",
     image_url="https://example.com/first-frame.png",  # https only
-    model="kling-2.5",
+    model="x-ai/grok-imagine-video-1.5",
     duration=5,
 )
 polled = await client.tools.video_status("job_abc")

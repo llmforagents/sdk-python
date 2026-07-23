@@ -169,7 +169,7 @@ async def test_generate_video_delegates_to_mcp_tool(tools):
         return_value=_mcp_text_response('{"id":"job_1","status":"pending"}')
     )
     result = await tools.generate_video(
-        "A cat riding a skateboard", model="kling-2.5", duration=5
+        "A cat riding a skateboard", model="x-ai/grok-imagine-video-1.5", duration=5
     )
     assert "job_1" in result.text
 
@@ -178,7 +178,7 @@ async def test_generate_video_delegates_to_mcp_tool(tools):
     assert sent_body["params"]["name"] == "generate_video"
     assert sent_body["params"]["arguments"] == {
         "prompt": "A cat riding a skateboard",
-        "model": "kling-2.5",
+        "model": "x-ai/grok-imagine-video-1.5",
         "duration": 5,
     }
 

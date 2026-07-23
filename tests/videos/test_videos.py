@@ -32,7 +32,7 @@ async def test_create_posts_to_v1_videos_and_returns_accepted_shape(videos):
     )
     result = await videos.create(
         prompt="A cat riding a skateboard",
-        model="kling-2.5",
+        model="x-ai/grok-imagine-video-1.5",
         duration=5,
         resolution="720p",
     )
@@ -46,7 +46,7 @@ async def test_create_posts_to_v1_videos_and_returns_accepted_shape(videos):
     sent_body = _json.loads(sent.content)
     assert sent_body == {
         "prompt": "A cat riding a skateboard",
-        "model": "kling-2.5",
+        "model": "x-ai/grok-imagine-video-1.5",
         "duration": 5,
         "resolution": "720p",
     }
