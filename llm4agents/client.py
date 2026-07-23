@@ -11,6 +11,7 @@ from llm4agents.tools.tools import Tools
 from llm4agents.agents import Agents
 from llm4agents.embeddings.embeddings import Embeddings
 from llm4agents.audio.audio import Audio
+from llm4agents.videos.videos import Videos
 from llm4agents.x402.client import X402Namespace
 from llm4agents.x402.types import PaymentConfig
 
@@ -79,6 +80,7 @@ class LLM4AgentsClient:
         self.agents = Agents(self._http)
         self.embeddings = Embeddings(self._http)
         self.audio = Audio(self._http)
+        self.videos = Videos(self._http)
         self.x402 = X402Namespace(resolved_payment, base_url, timeout)
 
     async def close(self) -> None:

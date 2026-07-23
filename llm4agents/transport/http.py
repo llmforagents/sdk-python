@@ -217,6 +217,22 @@ class HttpTransport:
                 raise map_http_error(res.status_code, res.json(), self._request_id(res))
             return res.json()
 
+    async def get_binary(
+        self, path: str, params: dict[str, Any] | None = None
+    ) -> tuple[bytes, httpx.Headers]:
+        """Same as get() but for endpoints that return raw binary bytes
+        (e.g. video content) instead of JSON. Returns (raw_bytes, response_headers)."""
+        async with self._client() as client:
+            try:
+                res = await client.get(path, params=params)
+            except httpx.TimeoutException as e:
+                raise LLM4AgentsError(str(e), "timeout", None, None) from e
+            except httpx.NetworkError as e:
+                raise LLM4AgentsError(str(e), "network_error", None, None) from e
+            if res.status_code >= 400:
+                raise map_http_error(res.status_code, res.json(), self._request_id(res))
+            return res.content, res.headers
+
     async def post(self, path: str, body: dict[str, Any]) -> Any:
         # Build auth headers FIRST (in x402 mode this issues the probe).
         auth_headers = await self._build_post_headers(path, body)

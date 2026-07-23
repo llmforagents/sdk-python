@@ -830,6 +830,52 @@ result = await client.tools.text_to_speech("Hola, ¿cómo estás?", voice="eve",
 
 `tools.text_to_speech()` delegates to the `text_to_speech` MCP tool (metered per 1k input characters). Audio payloads over 256KB are not inlined in the tool result — they land in your workspace storage instead; check `result.text` / `result.raw` for the workspace reference.
 
+## Video (async)
+
+Video generation is asynchronous: `create()` returns immediately with a job id and a charge estimate, and you poll `get()` until the job reaches a terminal status before fetching bytes with `content()`.
+
+```python
+import asyncio
+
+job = await client.videos.create(
+    prompt="A cat riding a skateboard through a neon city",
+    model="kling-2.5",
+    duration=5,
+    resolution="720p",
+    aspect_ratio="16:9",
+    generate_audio=True,
+)
+print(job.id, job.status, job.charged_usd_cents)  # -> 'job_abc', 'pending', 250
+
+# Poll until the job is done
+status = await client.videos.get(job.id)
+while status.status in ("pending", "in_progress"):
+    await asyncio.sleep(5)
+    status = await client.videos.get(job.id)
+
+if status.status == "completed":
+    result = await client.videos.content(job.id)
+    open("output.mp4", "wb").write(result.data)
+elif status.status == "failed":
+    print(status.error, "refunded:", status.refunded)
+```
+
+`videos.create()` posts to `POST /v1/videos` and returns a `VideoJobAccepted` (`202`): `id`, `status`, `polling_url`, `charged_usd_cents` — the estimated charge reserved upfront. `videos.get(job_id)` polls `GET /v1/videos/{job_id}` and returns a `VideoJobStatus` whose `status` is one of `pending | in_progress | completed | failed | cancelled | expired`; once `completed` it carries `video_url`, and on `failed`/`cancelled`/`expired` it carries `error` and a `refunded` flag (the reserved estimate is automatically refunded when a job doesn't complete). `videos.content(job_id)` fetches `GET /v1/videos/{job_id}/content` and returns a `VideoContentResult`: `.data` (`bytes` — raw mp4 bytes), `.content_type` (defaults to `video/mp4`), and an optional `.request_id` from the `x-request-id` response header. Like audio, the entire `/v1/videos` surface is **Bearer-only** — it is not on the x402 walk-up allowlist.
+
+MCP tool equivalents, useful inside `client.tools.call()` dispatch or a tool-calling conversation loop:
+
+```python
+started = await client.tools.generate_video(
+    "A cat riding a skateboard through a neon city",
+    image_url="https://example.com/first-frame.png",  # https only
+    model="kling-2.5",
+    duration=5,
+)
+polled = await client.tools.video_status("job_abc")
+```
+
+`tools.generate_video()` delegates to the `generate_video` MCP tool and `tools.video_status(job_id)` delegates to `video_status` (with the job id passed as `job_id`). Prefer `client.videos.*` for the typed REST flow above; these wrappers exist for tool-calling loops that dispatch by tool name.
+
 ## Error Handling
 
 All errors are instances of `LLM4AgentsError`:
@@ -885,11 +931,23 @@ client = LLM4AgentsClient(
   `client.tools.text_to_speech(text, voice=None, model=None, format=None)` for tool-calling
   conversation loops. See [Audio (TTS)](#audio-tts).
 - New types exported: `Audio`, `Speech`, `SpeechResult`.
+- **Async video generation** — `client.videos.create(prompt=..., model=None, image=None, duration=None,
+  resolution=None, aspect_ratio=None, generate_audio=None, seed=None)` posts to `POST /v1/videos` and
+  returns a `VideoJobAccepted` (`202`) immediately; poll with `client.videos.get(job_id)` until
+  `status` is terminal, then fetch bytes with `client.videos.content(job_id)`
+  (`VideoContentResult.data` is `bytes`, `.content_type` defaults to `video/mp4`).
+  Failed/cancelled/expired jobs are automatically refunded (`VideoJobStatus.refunded`). This
+  endpoint is Bearer-only (not on the x402 walk-up allowlist). MCP-tool equivalents are also
+  available as `client.tools.generate_video(prompt, image_url=None, model=None, duration=None,
+  resolution=None, aspect_ratio=None, generate_audio=None)` and `client.tools.video_status(job_id)`.
+  See [Video (async)](#video-async).
+- New types exported: `Videos`, `VideoJobAccepted`, `VideoJobStatus`, `VideoContentResult`.
 - The REST API's `GET /api/v1/transactions` endpoint now accepts an optional `?service=` query
   filter (alongside the existing `?type=`) to narrow results to a specific billed service:
-  `llm` (chat completions + embeddings, default), `tts` (audio speech), `tools` (MCP registry
-  tools), `scraper`, `search`, `image`, `workspace`. Typed SDK support for this filter will land
-  in a follow-up release — for now, pass it via a raw HTTP call against the REST endpoint if needed.
+  `llm` (chat completions + embeddings, default), `tts` (audio speech), `video` (video
+  generation), `tools` (MCP registry tools), `scraper`, `search`, `image`, `workspace`. Typed SDK
+  support for this filter will land in a follow-up release — for now, pass it via a raw HTTP call
+  against the REST endpoint if needed.
 
 ## What's New
 

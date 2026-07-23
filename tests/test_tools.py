@@ -161,3 +161,37 @@ async def test_text_to_speech_delegates_to_mcp_tool(tools):
         "voice": "eve",
         "format": "mp3",
     }
+
+
+@respx.mock
+async def test_generate_video_delegates_to_mcp_tool(tools):
+    route = respx.post("https://mcp.example.com/mcp").mock(
+        return_value=_mcp_text_response('{"id":"job_1","status":"pending"}')
+    )
+    result = await tools.generate_video(
+        "A cat riding a skateboard", model="kling-2.5", duration=5
+    )
+    assert "job_1" in result.text
+
+    import json as _json
+    sent_body = _json.loads(route.calls.last.request.content)
+    assert sent_body["params"]["name"] == "generate_video"
+    assert sent_body["params"]["arguments"] == {
+        "prompt": "A cat riding a skateboard",
+        "model": "kling-2.5",
+        "duration": 5,
+    }
+
+
+@respx.mock
+async def test_video_status_delegates_to_mcp_tool(tools):
+    route = respx.post("https://mcp.example.com/mcp").mock(
+        return_value=_mcp_text_response('{"id":"job_1","status":"completed"}')
+    )
+    result = await tools.video_status("job_1")
+    assert "completed" in result.text
+
+    import json as _json
+    sent_body = _json.loads(route.calls.last.request.content)
+    assert sent_body["params"]["name"] == "video_status"
+    assert sent_body["params"]["arguments"] == {"job_id": "job_1"}

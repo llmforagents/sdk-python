@@ -29,6 +29,12 @@ from llm4agents.audio import (
     Speech,
     SpeechResult,
 )
+from llm4agents.videos import (
+    Videos,
+    VideoJobAccepted,
+    VideoJobStatus,
+    VideoContentResult,
+)
 from llm4agents.x402 import (
     CHAIN_ID_BY_NETWORK,
     DEFAULT_VALID_FOR_SECONDS,
@@ -88,6 +94,10 @@ __all__ = [
     "Audio",
     "Speech",
     "SpeechResult",
+    "Videos",
+    "VideoJobAccepted",
+    "VideoJobStatus",
+    "VideoContentResult",
     # x402 walk-up payment
     "PaymentConfig",
     "PaymentPayload",

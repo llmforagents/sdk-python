@@ -263,3 +263,9 @@ class Tools:
 
     async def text_to_speech(self, text: str, **kwargs: Any) -> McpToolResult:
         return await self._mcp.call_tool("text_to_speech", {"text": text, **kwargs})
+
+    async def generate_video(self, prompt: str, **kwargs: Any) -> McpToolResult:
+        return await self._mcp.call_tool("generate_video", {"prompt": prompt, **kwargs})
+
+    async def video_status(self, job_id: str) -> McpToolResult:
+        return await self._mcp.call_tool("video_status", {"job_id": job_id})
