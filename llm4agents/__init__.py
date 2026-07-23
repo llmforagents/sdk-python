@@ -35,6 +35,11 @@ from llm4agents.videos import (
     VideoJobStatus,
     VideoContentResult,
 )
+from llm4agents.images import (
+    Images,
+    GeneratedImage,
+    ImagesGenerateResponse,
+)
 from llm4agents.x402 import (
     CHAIN_ID_BY_NETWORK,
     DEFAULT_VALID_FOR_SECONDS,
@@ -98,6 +103,9 @@ __all__ = [
     "VideoJobAccepted",
     "VideoJobStatus",
     "VideoContentResult",
+    "Images",
+    "GeneratedImage",
+    "ImagesGenerateResponse",
     # x402 walk-up payment
     "PaymentConfig",
     "PaymentPayload",
