@@ -884,7 +884,7 @@ Synchronous image generation — unlike video, `generate()` returns the finished
 ```python
 res = await client.images.generate(
     prompt="A robot writing code, studio lighting",
-    model="x-ai/grok-image-1.0",
+    model="x-ai/grok-imagine-image-quality",
     n=1,
     resolution="1K",
     output_format="png",
@@ -898,7 +898,7 @@ if image:
     open("output.png", "wb").write(base64.b64decode(image.b64_json))
 ```
 
-`images.generate()` posts to `POST /v1/images/generations` and returns an `ImagesGenerateResponse`: `created` (unix timestamp, optional), `data` (list of `GeneratedImage` — `.b64_json` base64-encoded image bytes, decode with `base64.b64decode(...)`, and `.media_type`), and `cost_usd` — the **real** cost in USD for the images actually generated (not an upfront estimate like `videos.create()`'s `charged_usd_cents`). `prompt` and `model` are named parameters; any other field accepted by the endpoint (`n`, `resolution`, `aspect_ratio`, `quality`, `output_format`, `background`, `output_compression`, `seed`, `input_references`, ...) can be passed as a keyword argument and is forwarded as-is (omitted when `None`). The same billing detail is echoed in the `x-charged-usd-cents` response header alongside `x-request-id` and `x-model-used`. A 402 raises the usual `insufficient_balance` `LLM4AgentsError`. Like audio and video, `/v1/images/generations` is **Bearer-only** — it is not on the x402 walk-up allowlist.
+`images.generate()` posts to `POST /v1/images/generations` and returns an `ImagesGenerateResponse`: `created` (unix timestamp, optional), `data` (list of `GeneratedImage` — `.b64_json` base64-encoded image bytes, decode with `base64.b64decode(...)`, and `.media_type`), and `cost_usd` — the **real** cost in USD for the images actually generated (not an upfront estimate like `videos.create()`'s `charged_usd_cents`). `prompt` and `model` are named parameters; any other field accepted by the endpoint (`n`, `resolution`, `aspect_ratio`, `quality`, `output_format`, `background`, `output_compression`, `seed`, `input_references`, ...) can be passed as a keyword argument and is forwarded as-is (omitted when `None`). The `x-charged-usd-cents` response header (alongside `x-request-id` and `x-model-used`) carries the **actual amount debited from your balance** — `cost_usd` plus the platform fee, rounded up to the nearest cent — which is not the same number as `cost_usd` itself. A 402 raises the usual `insufficient_balance` `LLM4AgentsError`. Like audio and video, `/v1/images/generations` is **Bearer-only** — it is not on the x402 walk-up allowlist.
 
 **`client.images.generate` vs `client.tools.image.*`:** these are two different surfaces and are not interchangeable. `client.images.generate()` talks to the main proxy's `/v1/images/generations` REST endpoint directly — synchronous, typed, and billed against your agent balance like chat/embeddings/audio/video. `client.tools.image.*` (see [MCP Tools → Image](#image)) instead dispatches to the scraper-worker's PiAPI-backed `generate_image` / `edit_image` / `analyze_image` MCP tools, which support image editing and vision analysis that the `/v1/images/generations` endpoint does not, and are priced per the MCP tool pricing table rather than the images-service model catalog. Use `client.images.generate()` for straightforward text-to-image generation against a specific model slug; use `client.tools.image.*` when you need edit/analyze or are already driving a tool-calling conversation loop.
 
@@ -973,8 +973,9 @@ client = LLM4AgentsClient(
   (`ImagesGenerateResponse.data[].b64_json`, base64) — no polling, unlike video. Extra fields
   (`resolution`, `aspect_ratio`, `quality`, `output_format`, `background`, `output_compression`,
   `seed`, `input_references`, ...) pass through as keyword arguments and are omitted when `None`.
-  `cost_usd` reports the real USD cost of the images actually generated, also echoed via the
-  `x-charged-usd-cents` response header. This endpoint is Bearer-only (not on the x402 walk-up
+  `cost_usd` reports the real USD cost of the images actually generated; the `x-charged-usd-cents`
+  response header instead carries the amount actually charged to your balance (`cost_usd` plus the
+  platform fee, rounded up to the cent). This endpoint is Bearer-only (not on the x402 walk-up
   allowlist) and is distinct from the PiAPI-backed `client.tools.image.*` MCP tools (edit/analyze
   support, separate pricing). See [Images](#images).
 - New types exported: `Images`, `GeneratedImage`, `ImagesGenerateResponse`.
